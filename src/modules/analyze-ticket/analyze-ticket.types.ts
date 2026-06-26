@@ -73,6 +73,7 @@ export interface ExtractedSignals {
   hasPinOtpPasswordSignal: boolean;
   hasScamSignal: boolean;
   hasRefundSignal: boolean;
+  hasBuyersRemorseSignal: boolean;
   hasWrongTransferSignal: boolean;
   hasFailedPaymentSignal: boolean;
   hasDuplicateSignal: boolean;

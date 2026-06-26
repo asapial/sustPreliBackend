@@ -14,35 +14,67 @@ export const analyzeTicketController = async (req: Request, res: Response, next:
     const parseResult = AnalyzeTicketSchema.safeParse(req.body);
 
     if (!parseResult.success) {
-      const firstIssue = parseResult.error.issues[0];
+      const issues = parseResult.error.issues;
+      const firstIssue = issues[0];
 
-      // Empty complaint → 422
+      // Human-readable field name map
+      const fieldLabels: Record<string, string> = {
+        ticket_id: "Ticket ID",
+        complaint: "Complaint",
+        language: "Language",
+        channel: "Channel",
+        user_type: "User Type",
+        transaction_history: "Transaction History",
+        campaign_context: "Campaign Context",
+        metadata: "Metadata",
+      };
+
+      // Empty complaint → 422 Unprocessable Entity
       if (
         firstIssue?.path[0] === "complaint" &&
         firstIssue?.code === "too_small"
       ) {
         res.status(422).json({
           error: true,
-          message: "Complaint cannot be empty",
+          message: "Your complaint message cannot be empty. Please describe your issue and try again.",
         });
         return;
       }
 
-      // Missing required fields → 400
+      // Map each Zod issue to a friendly message
+      const details = issues.map((issue) => {
+        const field = issue.path.length > 0
+          ? fieldLabels[String(issue.path[0])] ?? String(issue.path[0])
+          : "Request body";
+
+        const code = (issue as any).code as string;
+        if (code === "invalid_enum_value" || code === "invalid_value") {
+          const received = (issue as any).received ?? (issue as any).input;
+          const options = (issue as any).options ?? (issue as any).values;
+          return `'${field}' has an invalid value '${received}'. Accepted values are: ${Array.isArray(options) ? options.join(", ") : "see documentation"}.`;
+        }
+        if (issue.code === "invalid_type" && (issue as any).received === "undefined") {
+          return `'${field}' is required but was not provided.`;
+        }
+        return `'${field}': ${issue.message}`;
+      });
+
+      // Generic validation failure → 400 Bad Request
       res.status(400).json({
         error: true,
-        message: "Invalid request body: " + parseResult.error.issues.map((i) => i.message).join(", "),
+        message: "We were unable to process your request due to invalid input. Please review the details below and try again.",
+        details,
       });
       return;
     }
 
     const input = parseResult.data;
 
-    // ── Complaint must not be just whitespace ────────────────────────────────
+    // ── Complaint must not be just whitespace ────────────────────────────────────
     if (!input.complaint.trim()) {
       res.status(422).json({
         error: true,
-        message: "Complaint cannot be empty or whitespace",
+        message: "Your complaint message cannot be empty or contain only spaces. Please describe your issue and try again.",
       });
       return;
     }
@@ -68,7 +100,7 @@ export const analyzeTicketController = async (req: Request, res: Response, next:
     if (err instanceof ZodError) {
       res.status(400).json({
         error: true,
-        message: "Invalid request format",
+        message: "We received a request in an unexpected format. Please check your input and try again.",
       });
       return;
     }

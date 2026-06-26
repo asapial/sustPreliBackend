@@ -22,8 +22,8 @@ export const AnalyzeTicketSchema = z.object({
     .optional(),
   user_type: z.enum(["customer", "merchant", "agent", "unknown"]).optional(),
   campaign_context: z.string().optional(),
-  transaction_history: z.array(TransactionEntrySchema).optional().default([]),
-  metadata: z.record(z.unknown()).optional().default({}),
+  transaction_history: z.array(TransactionEntrySchema).optional().default(() => []),
+  metadata: z.record(z.string(), z.unknown()).optional().default(() => ({})),
 });
 
 export type AnalyzeTicketInput = z.infer<typeof AnalyzeTicketSchema>;

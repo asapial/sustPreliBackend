@@ -28,6 +28,7 @@ import {
   Department,
   EvidenceVerdict,
   ExtractedSignals,
+  Language,
   Severity,
   TransactionEntry,
 } from "./analyze-ticket.types.js";
@@ -61,6 +62,77 @@ function classifyCaseType(signals: ExtractedSignals): CaseType {
   if (signals.hasRefundSignal) return "refund_request";
   if (signals.hasFailedPaymentSignal) return "payment_failed";
   return "other";
+}
+
+// ── Multi-transaction Pattern Detector ───────────────────────────────────────
+// Looks for suspicious patterns across ALL transactions that a single best-score
+// pick would miss. Returns a structured anomaly report for the agent summary.
+
+interface MultiTxnAnomaly {
+  type: "multiple_same_amount_different_recipients" | "failed_after_completed" | "none";
+  transactions: TransactionEntry[];
+  description: string;
+}
+
+function detectMultiTransactionAnomalies(
+  transactions: TransactionEntry[],
+  caseType: CaseType
+): MultiTxnAnomaly {
+  if (!transactions || transactions.length < 2) {
+    return { type: "none", transactions: [], description: "" };
+  }
+
+  // ── Pattern 1: Same amount, transfers, different recipients on the same day ─
+  // Catches TKT-008: "sent 1000 to brother" but 2 different recipients received 1000
+  const transfers = transactions.filter((t) => t.type === "transfer" || t.type === "payment");
+  if (transfers.length >= 2) {
+    // Group by amount
+    const byAmount: Map<number, TransactionEntry[]> = new Map();
+    for (const t of transfers) {
+      if (t.amount === undefined) continue;
+      const existing = byAmount.get(t.amount) ?? [];
+      existing.push(t);
+      byAmount.set(t.amount, existing);
+    }
+    for (const [, group] of byAmount) {
+      if (group.length >= 2) {
+        // Check if they have different counterparties
+        const counterparties = [...new Set(group.map((t) => t.counterparty).filter(Boolean))];
+        if (counterparties.length >= 2) {
+          return {
+            type: "multiple_same_amount_different_recipients",
+            transactions: group,
+            description:
+              `Found ${group.length} transfers of ${fmt(group[0]?.amount)} to ` + +
+              `${group.length} different recipients: ${counterparties.join(", ")}. ` +
+              `This pattern suggests a possible wrong transfer or unintended duplicate.`,
+          };
+        }
+      }
+    }
+  }
+
+  // ── Pattern 2: Completed transfer followed by a failed retry to same recipient ─
+  // Catches: completed TXN → failed TXN to same counterparty → customer confused
+  const completedTransfers = transfers.filter((t) => t.status === "completed");
+  const failedTransfers = transfers.filter((t) => t.status === "failed");
+  for (const failed of failedTransfers) {
+    const matchingCompleted = completedTransfers.find(
+      (c) => c.counterparty === failed.counterparty && Math.abs((c.amount ?? 0) - (failed.amount ?? 0)) < 1
+    );
+    if (matchingCompleted) {
+      return {
+        type: "failed_after_completed",
+        transactions: [matchingCompleted, failed],
+        description:
+          `A transfer of ${fmt(failed.amount)} to ${failed.counterparty} was completed (${matchingCompleted.transaction_id}) ` +
+          `but a subsequent retry (${failed.transaction_id}) failed. ` +
+          `The original transfer likely went through — the failed retry may have caused confusion.`,
+      };
+    }
+  }
+
+  return { type: "none", transactions: [], description: "" };
 }
 
 // ── 2. Transaction Matching ───────────────────────────────────────────────────
@@ -171,8 +243,8 @@ function findRelevantTransaction(
   if (caseType === "duplicate_payment") {
     for (let i = 0; i < transactions.length; i++) {
       for (let j = i + 1; j < transactions.length; j++) {
-        const a = transactions[i];
-        const b = transactions[j];
+        const a = transactions[i]!;
+        const b = transactions[j]!;
         if (
           a.amount === b.amount &&
           a.counterparty === b.counterparty &&
@@ -436,10 +508,36 @@ function generateAgentSummary(
   evidenceVerdict: EvidenceVerdict,
   department: Department,
   txn: TransactionEntry | null,
-  signals: ExtractedSignals
+  signals: ExtractedSignals,
+  transactions: TransactionEntry[],
+  anomaly: MultiTxnAnomaly,
+  isBuyersRemorse: boolean
 ): string {
   const caseLabel = caseType.replace(/_/g, " ");
   const dept = department.replace(/_/g, " ");
+
+  // ── Multi-transaction anomaly: always surface the full picture ───────────
+  if (anomaly.type !== "none" && anomaly.transactions.length > 0) {
+    const txnList = anomaly.transactions
+      .map((t) => `${t.transaction_id} (${fmtType(t.type)}, ${fmt(t.amount ?? 0)} → ${t.counterparty ?? "unknown"}, ${t.status})`)
+      .join(" | ");
+    return (
+      `Customer reports a ${caseLabel} issue. ANOMALY DETECTED — ${anomaly.description} ` +
+      `Affected transactions: [${txnList}]. ` +
+      `Evidence verdict: ${evidenceVerdict}. Manual investigation required — case routed to ${dept}.`
+    );
+  }
+
+  // ── Buyer's remorse: flag it explicitly for the agent ────────────────────
+  if (isBuyersRemorse && caseType === "refund_request" && txn) {
+    return (
+      `Customer requests a refund of ${fmt(txn.amount)} for transaction ${txn.transaction_id} ` +
+      `(${fmtType(txn.type)} to ${txn.counterparty ?? "merchant"}, status: ${txn.status ?? "unknown"}). ` +
+      `BUYER\'S REMORSE DETECTED — customer explicitly states they changed their mind / no longer want the product. ` +
+      `This is a voluntary cancellation, not a system failure. Platform refund policy likely does not apply. ` +
+      `Agent should advise customer to contact the merchant directly. Case routed to ${dept}.`
+    );
+  }
 
   if (txn) {
     const txnAmount = fmt(txn.amount);
@@ -461,6 +559,24 @@ function generateAgentSummary(
       `Customer reports a ${caseLabel} issue. Matched transaction: ${txn.transaction_id} ` +
       `(${txnType}, ${txnAmount}${txnCp}, status: ${txnStatus}${txnTs}). ` +
       `${verdictNote}. Case routed to ${dept}.`
+    );
+  }
+
+  // ── Vague/other case: enumerate recent transaction history ───────────────
+  if (caseType === "other" && transactions.length > 0) {
+    const recentTxns = transactions
+      .slice(-3) // last 3 transactions at most
+      .map((t) => `${t.transaction_id} (${fmtType(t.type)}, ${fmt(t.amount)}, ${t.status})`)
+      .join("; ");
+    const amountHint =
+      signals.mentionedAmounts.length > 0
+        ? ` Customer mentioned approximately ${fmt(Math.max(...signals.mentionedAmounts))}.`
+        : "";
+    return (
+      `Customer reports an unspecified financial concern.${amountHint} ` +
+      `No specific keywords matched a known case type. ` +
+      `Recent account activity on file: [${recentTxns}]. ` +
+      `Agent should review these transactions with the customer and probe for the exact issue. Case routed to ${dept}.`
     );
   }
 
@@ -511,26 +627,216 @@ function generateRecommendedNextAction(
   }
 }
 
-// ── 9. Customer Reply ─────────────────────────────────────────────────────────
+// ── 9. Customer Reply (Language-Aware, Humanized) ─────────────────────────────
+// Generates a warm, empathetic customer-facing reply.
+// Language: "en" = English, "bn" = native Bangla, "mixed" = Banglish
 
-function generateCustomerReply(caseType: CaseType): string {
+interface CustomerReplyContext {
+  txnId?: string | null;
+  amount?: number;
+  counterparty?: string | null;
+  isBuyersRemorse?: boolean;
+  anomaly?: MultiTxnAnomaly;
+}
+
+function generateCustomerReply(
+  caseType: CaseType,
+  language: Language = "en",
+  ctx: CustomerReplyContext = {}
+): string {
+  const ref = ctx.txnId ? ` (Ref: ${ctx.txnId})` : "";
+  const amtStr = ctx.amount ? ` ${fmt(ctx.amount)}` : "";
+
+  // ── English replies ────────────────────────────────────────────────────────
+  if (language === "en") {
+    switch (caseType) {
+      case "wrong_transfer":
+        return (
+          `Hi there! We're really sorry to hear about this — we completely understand how stressful it must be to have a transfer go to the wrong place. ` +
+          `We've logged your concern${ref} and our Dispute Resolution team will look into it right away. ` +
+          `We'll do everything we can to help resolve this as quickly as possible. ` +
+          `In the meantime, please remember that our team will never ask for your PIN, OTP, or password — please don't share these with anyone.`
+        );
+      case "payment_failed":
+        return (
+          `We're sorry to hear your payment didn't go through as expected! We know how frustrating that can be. ` +
+          `We've received your report${ref} and our Payments team is already reviewing the transaction details. ` +
+          `If any amount was deducted from your account, rest assured it will be handled as per our policy. ` +
+          `We'll get back to you with an update shortly. Please don't share your PIN or OTP with anyone.`
+        );
+      case "refund_request":
+        if (ctx.isBuyersRemorse) {
+          return (
+            `Thank you for reaching out to us. We understand that sometimes plans change, and we appreciate your honesty. ` +
+            `However, we'd like to let you know that once a payment is successfully completed to a merchant${amtStr}, ` +
+            `our platform is unfortunately unable to process a reversal on the basis of a change of mind, as the funds have already been transferred to the merchant. ` +
+            `We'd recommend reaching out directly to the merchant to discuss a possible refund or exchange at their discretion. ` +
+            `If you believe there was an error with the transaction itself, please let us know and we'll be happy to investigate further.`
+          );
+        }
+        return (
+          `We've received your refund request${ref} and we truly understand how important this is to you. ` +
+          `Our team is reviewing the transaction details and will verify eligibility as quickly as possible. ` +
+          `Please note that refund decisions are subject to our official policy and may require a short verification period. ` +
+          `We appreciate your patience and will keep you updated. Please do not share your PIN or OTP with anyone.`
+        );
+      case "duplicate_payment":
+        return (
+          `We completely understand how worrying it is to see what looks like a double charge — and we want to sort this out for you right away. ` +
+          `We've flagged your concern${ref} and our Payments team will review all relevant transaction records to confirm whether a duplicate charge occurred. ` +
+          `If a duplicate deduction is confirmed, it will be addressed through our official process. We'll update you as soon as we have more information.`
+        );
+      case "merchant_settlement_delay":
+        return (
+          `We're sorry to hear about the delay in your merchant settlement. We know how important timely settlements are to your business. ` +
+          `We've noted your concern${ref} and our Merchant Operations team will review your settlement status immediately. ` +
+          `We'll follow up with you through official channels as soon as we have an update.`
+        );
+      case "agent_cash_in_issue":
+        return (
+          `We're sorry to hear your cash-in hasn't reflected in your account yet — that must be really inconvenient. ` +
+          `We've received your report${ref} and our Agent Operations team will verify the transaction record right away. ` +
+          `If there's any discrepancy, we'll follow the proper procedure to get it resolved. We'll be in touch shortly.`
+        );
+      case "phishing_or_social_engineering":
+        return (
+          `Thank you for alerting us — you did the right thing by reporting this immediately. ` +
+          `Please do NOT share your PIN, OTP, password, or any verification code with anyone, even if they claim to be from our support team. ` +
+          `Our team will NEVER ask for these details. We've flagged this incident for our Fraud & Risk team to review. ` +
+          `If you believe your account may have been compromised, please change your PIN immediately through the app.`
+        );
+      default:
+        if (ctx.anomaly && ctx.anomaly.type !== "none") {
+          return (
+            `Thank you for reaching out to us. We can see there are a few transactions on your account that we'd like to look into more carefully on your behalf. ` +
+            `We've logged your concern and our support team will review your recent transaction history to understand exactly what happened. ` +
+            `We'll get back to you with a clear explanation and any next steps. Please do not share your PIN or OTP with anyone.`
+          );
+        }
+        return (
+          `Thank you for reaching out to us! We understand you have a concern about your account and we want to make sure we get to the bottom of it. ` +
+          `Could you please share a bit more detail — such as the approximate date, amount, or transaction type you're referring to? ` +
+          `This will help our team look into it much faster. In the meantime, please do not share your PIN or OTP with anyone.`
+        );
+    }
+  }
+
+  // ── Bangla replies (native Bangla script) ─────────────────────────────────
+  if (language === "bn") {
+    switch (caseType) {
+      case "wrong_transfer":
+        return (
+          `আপনার অভিযোগ আমাদের কাছে পৌঁছে গেছে। ভুল নম্বরে টাকা চলে যাওয়া সত্যিই অনেক চিন্তার বিষয় — আমরা বুঝতে পারছি আপনি এখন কতটা উদ্বিগ্ন।` +
+          `${ref ? ` আপনার লেনদেন${ref}` : " আপনার বিষয়টি"} আমাদের ডিসপিউট রেজোলিউশন দলে পাঠানো হয়েছে, যারা এটি অগ্রাধিকারের ভিত্তিতে দেখবেন। ` +
+          `আমরা দ্রুত সমাধানের জন্য সব ধরনের সহায়তা করব। ` +
+          `মনে রাখবেন, আমাদের কোনো প্রতিনিধিই আপনার পিন, ওটিপি বা পাসওয়ার্ড জানতে চাইবেন না — এই তথ্য কারো সাথে শেয়ার করবেন না।`
+        );
+      case "payment_failed":
+        return (
+          `আপনার পেমেন্টটি সফল না হওয়ায় আমরা দুঃখিত। এটি সত্যিই বিরক্তিকর অভিজ্ঞতা, এবং আমরা বুঝতে পারছি আপনি কতটা হতাশ হয়েছেন। ` +
+          `আপনার অভিযোগ${ref} আমাদের পেমেন্টস দল পর্যালোচনা করছেন। ` +
+          `যদি আপনার অ্যাকাউন্ট থেকে কোনো পরিমাণ কেটে নেওয়া হয়ে থাকে, নিশ্চিত থাকুন — আমাদের নীতিমালা অনুযায়ী তা সঠিকভাবে সমাধান করা হবে। শীঘ্রই আপনাকে আপডেট জানানো হবে।`
+        );
+      case "refund_request":
+        if (ctx.isBuyersRemorse) {
+          return (
+            `আপনার সাথে যোগাযোগ করার জন্য ধন্যবাদ। আমরা বুঝতে পারছি যে কখনো কখনো মন পরিবর্তন হতে পারে। ` +
+            `তবে আমরা জানাতে চাই যে, মার্চেন্টকে${amtStr} সফলভাবে পেমেন্ট সম্পন্ন হয়ে গেলে, শুধুমাত্র মন পরিবর্তনের কারণে আমাদের প্ল্যাটফর্মের পক্ষে সেই লেনদেন বাতিল করা সম্ভব নয়, কারণ টাকাটি মার্চেন্টের কাছে চলে গেছে। ` +
+            `আপনি সরাসরি মার্চেন্টের সাথে যোগাযোগ করে রিফান্ড বা বিনিময়ের বিষয়ে আলোচনা করতে পারেন। ` +
+            `যদি লেনদেনে কোনো প্রযুক্তিগত সমস্যা হয়ে থাকে, আমাদের জানান — আমরা সেক্ষেত্রে সাহায্য করতে প্রস্তুত।`
+          );
+        }
+        return (
+          `আপনার রিফান্ড অনুরোধ${ref} আমরা পেয়েছি এবং বুঝতে পারছি এটি আপনার জন্য কতটা গুরুত্বপূর্ণ। ` +
+          `আমাদের দল লেনদেনের তথ্য যাচাই করে যত দ্রুত সম্ভব আপনাকে জানাবে। ` +
+          `রিফান্ড প্রক্রিয়াটি আমাদের অফিশিয়াল নীতিমালা অনুযায়ী সম্পন্ন হবে। আপনার ধৈর্যের জন্য ধন্যবাদ। পিন বা ওটিপি কারো সাথে শেয়ার করবেন না।`
+        );
+      case "duplicate_payment":
+        return (
+          `দুইবার চার্জ হওয়ার বিষয়টি সত্যিই উদ্বেগজনক — আমরা এটি বুঝতে পারছি। ` +
+          `আপনার অভিযোগ${ref} আমাদের পেমেন্টস দল পর্যালোচনা করবেন এবং ডুপ্লিকেট চার্জ নিশ্চিত হলে প্রয়োজনীয় ব্যবস্থা নেওয়া হবে। ` +
+          `আমরা শীঘ্রই আপনাকে আপডেট জানাব।`
+        );
+      case "merchant_settlement_delay":
+        return (
+          `মার্চেন্ট সেটেলমেন্টে দেরি হওয়ায় আমরা দুঃখিত। আমরা জানি ব্যবসার জন্য সময়মতো সেটেলমেন্ট কতটা জরুরি। ` +
+          `আপনার বিষয়টি${ref} আমাদের মার্চেন্ট অপারেশনস দলে পাঠানো হয়েছে। দ্রুত আপডেট দেওয়া হবে।`
+        );
+      case "agent_cash_in_issue":
+        return (
+          `ক্যাশ ইন ব্যালেন্সে না আসাটা সত্যিই অসুবিধাজনক — আমরা ক্ষমাপ্রার্থী। ` +
+          `আপনার অভিযোগ${ref} আমাদের এজেন্ট অপারেশনস দল তদন্ত করবেন এবং দ্রুত সমাধান করা হবে। শীঘ্রই আপনার সাথে যোগাযোগ করা হবে।`
+        );
+      case "phishing_or_social_engineering":
+        return (
+          `এটি রিপোর্ট করার জন্য আপনাকে ধন্যবাদ — আপনি একদম সঠিক কাজ করেছেন। ` +
+          `অনুগ্রহ করে কাউকে আপনার পিন, ওটিপি, পাসওয়ার্ড বা যেকোনো যাচাইকরণ কোড শেয়ার করবেন না, এমনকি যদি কেউ আমাদের প্রতিনিধি বলে দাবি করে। ` +
+          `আমাদের ফ্রড ও রিস্ক দল এই বিষয়টি তদন্ত করবে। যদি মনে হয় অ্যাকাউন্ট ক্ষতিগ্রস্ত হয়েছে, এখনই অ্যাপ থেকে পিন পরিবর্তন করুন।`
+        );
+      default:
+        return (
+          `আমাদের সাথে যোগাযোগ করার জন্য ধন্যবাদ। আপনার অ্যাকাউন্ট সম্পর্কিত উদ্বেগটি আমরা গুরুত্বের সাথে নিচ্ছি। ` +
+          `আমাদের সাপোর্ট দল বিষয়টি পর্যালোচনা করবেন। দ্রুত সমাধানের জন্য অনুগ্রহ করে তারিখ, পরিমাণ বা লেনদেনের ধরন উল্লেখ করুন। পিন বা ওটিপি কারো সাথে শেয়ার করবেন না।`
+        );
+    }
+  }
+
+  // ── Mixed / Banglish replies ───────────────────────────────────────────────
+  // (language === "mixed") — casual Banglish, warm & relatable
   switch (caseType) {
     case "wrong_transfer":
-      return "We have noted your concern about the transfer. Our support team will review the transaction details through official channels. Please do not share your PIN, OTP, password, or sensitive credentials with anyone.";
+      return (
+        `আপনার complaint টা আমরা পেয়েছি এবং বুঝতে পারছি এই ধরনের situation এ আপনি কতটা worried হয়ে পড়েছেন। ` +
+        `আপনার case${ref} আমাদের Dispute Resolution team এ পাঠানো হয়েছে, তারা এটা priority basis এ দেখবেন। ` +
+        `যত তাড়াতাড়ি সম্ভব আপনাকে update দেওয়া হবে। Please কখনো আপনার PIN বা OTP কারো সাথে share করবেন না।`
+      );
     case "payment_failed":
-      return "We have noted your concern about the payment. The transaction details will be checked through official support channels, and any eligible amount will be handled according to policy.";
+      return (
+        `আপনার payment টা expected ভাবে complete হয়নি — এটা সত্যিই frustrating, আমরা বুঝতে পারছি। ` +
+        `আমাদের Payments team আপনার transaction${ref} review করছে। ` +
+        `Balance deduct হলে সেটা policy অনুযায়ী handle করা হবে। Shortly আপনাকে update দেওয়া হবে।`
+      );
     case "refund_request":
-      return "We have received your refund-related concern. The team will verify the transaction and eligibility through official channels before any action is taken.";
+      if (ctx.isBuyersRemorse) {
+        return (
+          `আপনার সাথে যোগাযোগের জন্য ধন্যবাদ। আমরা বুঝতে পারছি situation টা। ` +
+          `কিন্তু একটু জানাই — merchant কে${amtStr} payment successfully complete হয়ে গেলে, ` +
+          `শুধু change of mind এর কারণে platform এর পক্ষ থেকে refund করা আমাদের policy তে নেই, কারণ টাকা merchant এর কাছে চলে গেছে। ` +
+          `সরাসরি merchant এর সাথে কথা বললে তারা হয়তো help করতে পারবেন। ` +
+          `যদি transaction এ কোনো technical error থেকে থাকে, আমাদের জানান।`
+        );
+      }
+      return (
+        `আপনার refund request${ref} আমরা পেয়েছি। আমরা জানি এটা আপনার জন্য কতটা important। ` +
+        `আমাদের team টা transaction details verify করবে এবং policy অনুযায়ী যত দ্রুত সম্ভব সমাধান করবে। ` +
+        `একটু patience রাখুন — আমরা আপনাকে update রাখব। PIN বা OTP share করবেন না।`
+      );
     case "duplicate_payment":
-      return "We have noted your concern about a possible duplicate payment. The relevant transaction details will be reviewed, and any eligible adjustment will be processed through official channels.";
+      return (
+        `Double charge হওয়াটা সত্যিই concerning — আপনার worry টা আমরা বুঝতে পারছি। ` +
+        `আমাদের Payments team আপনার transaction records${ref} দেখবে এবং duplicate confirm হলে সেটা official process এ handle করা হবে। শীঘ্রই update আসবে।`
+      );
     case "merchant_settlement_delay":
-      return "We have noted the merchant settlement concern. The merchant operations team will review the settlement status through official records.";
+      return (
+        `Merchant settlement এ দেরি হচ্ছে — এটা obviously business এর জন্য problem। আমরা সেটা বুঝি। ` +
+        `আপনার case${ref} আমাদের Merchant Operations team দেখবে। দ্রুত update দেওয়া হবে।`
+      );
     case "agent_cash_in_issue":
-      return "We have noted your concern about the cash-in transaction. The agent operations team will review the transaction record and follow official procedures.";
+      return (
+        `Cash in balance এ reflect না করাটা definitely inconvenient। এজন্য আমরা sorry। ` +
+        `আমাদের Agent Operations team আপনার transaction${ref} verify করবে এবং discrepancy থাকলে সেটা fix করা হবে। Shortly আপনার সাথে contact করা হবে।`
+      );
     case "phishing_or_social_engineering":
-      return "Please do not share your PIN, OTP, password, or verification code with anyone. We have flagged this concern for review through official support channels.";
+      return (
+        `এটা report করার জন্য ধন্যবাদ — এটা করা একদম সঠিক ছিল। ` +
+        `Please কাউকে আপনার PIN, OTP বা password share করবেন না, even যদি কেউ বলে সে আমাদের support team থেকে। আমরা কখনো এটা চাই না। ` +
+        `আমাদের Fraud team এটা investigate করবে। Account compromise হয়ে থাকলে এখনই app থেকে PIN change করুন।`
+      );
     default:
-      return "We have noted your concern. Our support team will review the available information and guide you through official channels.";
+      return (
+        `আমাদের সাথে contact করার জন্য ধন্যবাদ! আপনার account related concern টা আমরা সিরিয়াসলি নিচ্ছি। ` +
+        `একটু বেশি detail দিলে — যেমন date, amount, বা কোন transaction এর কথা বলছেন — আমাদের team আরো দ্রুত help করতে পারবে। PIN বা OTP share করবেন না।`
+      );
   }
 }
 
@@ -652,22 +958,43 @@ function applySafetyGuardrails(
 
 export function analyzeTicket(input: AnalyzeTicketRequest): AnalyzeTicketResponse {
   const transactions = input.transaction_history ?? [];
+  const language: Language = input.language ?? "en";
 
   const signals = extractSignals(input.complaint);
   const caseType = classifyCaseType(signals);
 
   const { txn, score: txnScore, isDuplicate } = findRelevantTransaction(transactions, signals, caseType);
 
+  // ── Multi-transaction anomaly detection ────────────────────────────────────
+  // Run AFTER single-best-txn pick so we can cross-reference the winner.
+  const anomaly = detectMultiTransactionAnomalies(transactions, caseType);
+
+  // ── Buyer's remorse flag ───────────────────────────────────────────────────
+  const isBuyersRemorse =
+    caseType === "refund_request" && signals.hasBuyersRemorseSignal;
+
   const evidenceVerdict = determineEvidenceVerdict(txn, caseType, signals, transactions, isDuplicate);
   const severity = determineSeverity(caseType, evidenceVerdict, signals, txn);
   const department = determineDepartment(caseType, severity, evidenceVerdict);
   const humanReviewRequired = determineHumanReview(caseType, severity, evidenceVerdict, txn, signals);
 
-  const agentSummary = generateAgentSummary(caseType, evidenceVerdict, department, txn, signals);
+  const agentSummary = generateAgentSummary(
+    caseType, evidenceVerdict, department, txn, signals, transactions, anomaly, isBuyersRemorse
+  );
   const recommendedNextAction = generateRecommendedNextAction(caseType, evidenceVerdict, txn);
-  const customerReply = generateCustomerReply(caseType);
+  const customerReply = generateCustomerReply(caseType, language, {
+    txnId: txn?.transaction_id ?? null,
+    ...(txn?.amount !== undefined ? { amount: txn.amount } : {}),
+    counterparty: txn?.counterparty ?? null,
+    isBuyersRemorse,
+    anomaly,
+  } as Parameters<typeof generateCustomerReply>[2]);
   const confidence = calculateConfidence(txn, txnScore, signals, evidenceVerdict, caseType);
   const reasonCodes = buildReasonCodes(caseType, txn, signals, evidenceVerdict, humanReviewRequired, isDuplicate, severity);
+
+  // Append anomaly reason code if detected
+  if (anomaly.type !== "none") reasonCodes.push("multi_transaction_anomaly_detected");
+  if (isBuyersRemorse) reasonCodes.push("buyers_remorse_detected");
 
   let response: AnalyzeTicketResponse = {
     ticket_id: input.ticket_id,
@@ -681,7 +1008,7 @@ export function analyzeTicket(input: AnalyzeTicketRequest): AnalyzeTicketRespons
     customer_reply: customerReply,
     human_review_required: humanReviewRequired,
     confidence,
-    reason_codes: reasonCodes,
+    reason_codes: [...new Set(reasonCodes)],
   };
 
   return applySafetyGuardrails(response, caseType, evidenceVerdict, txn);

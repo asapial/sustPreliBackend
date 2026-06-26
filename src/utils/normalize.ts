@@ -20,7 +20,7 @@ export function extractSignals(rawComplaint: string): ExtractedSignals {
   const amountMatches: number[] = [];
   let amountMatch;
   while ((amountMatch = amountPattern.exec(normalized)) !== null) {
-    const num = parseFloat(amountMatch[1].replace(/,/g, ""));
+    const num = parseFloat((amountMatch[1] ?? "").replace(/,/g, ""));
     if (!isNaN(num) && num > 0) amountMatches.push(num);
   }
   const mentionedAmounts = [...new Set(amountMatches)];
@@ -53,6 +53,17 @@ export function extractSignals(rawComplaint: string): ExtractedSignals {
     "get my money back", "want refund", "need refund",
   ];
   const hasRefundSignal = refundKeywords.some((kw) => normalized.includes(kw));
+
+  // ── Buyer's-remorse signals ──────────────────────────────────────────────
+  // Indicates the customer is requesting a refund not due to a system failure
+  // but due to a change of mind / voluntary cancellation.
+  const buyersRemorseKeywords = [
+    "changed my mind", "don't want", "do not want", "no longer want",
+    "want to cancel", "cancel my order", "cancel order", "cancelled order",
+    "i don't need", "i do not need", "decided not to", "won't buy",
+    "মন পরিবর্তন", "আর চাই না", "বাতিল করতে চাই", "কিনব না",
+  ];
+  const hasBuyersRemorseSignal = buyersRemorseKeywords.some((kw) => normalized.includes(kw));
 
   // ── Wrong transfer signals ───────────────────────────────────────────────
   const wrongTransferKeywords = [
@@ -134,6 +145,7 @@ export function extractSignals(rawComplaint: string): ExtractedSignals {
     hasPinOtpPasswordSignal,
     hasScamSignal,
     hasRefundSignal,
+    hasBuyersRemorseSignal,
     hasWrongTransferSignal,
     hasFailedPaymentSignal,
     hasDuplicateSignal,
