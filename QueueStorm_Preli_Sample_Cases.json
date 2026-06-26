@@ -1,0 +1,52 @@
+{
+    "id": "SAMPLE",
+    "label": "Failed payment with duplicate balance deduction in mixed language",
+    "input": {
+        "ticket_id": "TKT-011",
+        "complaint": "Ami 1500 taka shop-e payment korlam. Kintu app dekhayse failed, ar amar account theke 1500 taka duibar kete niyese! Please eita thik koren ar taka ফেরত দেন।",
+        "language": "mixed",
+        "channel": "in_app_chat",
+        "user_type": "customer",
+        "transaction_history": [
+            {
+                "transaction_id": "TXN-11001",
+                "timestamp": "2026-06-25T11:20:00Z",
+                "type": "payment",
+                "amount": 1500,
+                "counterparty": "MERCHANT-GROCERY-99",
+                "status": "failed"
+            },
+            {
+                "transaction_id": "TXN-11002",
+                "timestamp": "2026-06-25T11:20:15Z",
+                "type": "payment",
+                "amount": 1500,
+                "counterparty": "MERCHANT-GROCERY-99",
+                "status": "failed"
+            }
+        ]
+    },
+    "expected_output": {
+        "ticket_id": "TKT-011",
+        "relevant_transaction_id": "TXN-11001",
+        "evidence_verdict": "inconsistent",
+        "case_type": "duplicate_payment",
+        "severity": "medium",
+        "department": "payments_ops",
+        "agent_summary": "Customer reports a duplicate payment issue. Matched transaction: TXN-11001 (payment, 1,500 BDT to MERCHANT-GROCERY-99, status: failed on Thu, 25 Jun 2026 11:20:00 GMT). Transaction evidence contradicts the complaint — payment of 1,500 BDT is marked failed, which conflicts with the reported issue. Case routed to payments ops.",
+        "recommended_next_action": "Pull full payment records around  (reference: TXN-11001) and compare amount, counterparty, and timestamp for duplicate entries. Escalate to payments_ops if confirmed double debit.",
+        "customer_reply": "Double charge হওয়াটা definitely concerning। 1,500 BDT এর double charge (TXN-11001) এর বিষয়টা আমরা দেখছি। আমাদের Payments team সব transaction records review করবে এবং duplicate confirm হলে official process এ handle করা হবে। শীঘ্রই update আসবে।",
+        "human_review_required": true,
+        "confidence": 0.65,
+        "reason_codes": [
+            "duplicate_payment",
+            "transaction_match",
+            "amount_match",
+            "type_match",
+            "status_failed",
+            "evidence_contradiction",
+            "human_review_required"
+        ]
+    },
+    "rationale": "The customer complained in a mixed language (Banglish) about a 1500 BDT payment failure and double deduction. The transaction history matches perfectly, showing two failed attempts back-to-back. The relevant transaction is targeted to the second anomaly (TXN-11002). The customer reply is drafted safely in clean Bengali—acknowledging the issue and reiterating PIN/OTP safety rules without giving an unauthorized absolute promise of refund (using conditional safe language instead)."
+}

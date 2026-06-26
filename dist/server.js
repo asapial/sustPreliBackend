@@ -142,8 +142,8 @@ var AnalyzeTicketSchema = z.object({
   channel: z.enum(["in_app_chat", "call_center", "email", "merchant_portal", "field_agent"]).optional(),
   user_type: z.enum(["customer", "merchant", "agent", "unknown"]).optional(),
   campaign_context: z.string().optional(),
-  transaction_history: z.array(TransactionEntrySchema).optional().default([]),
-  metadata: z.record(z.unknown()).optional().default({})
+  transaction_history: z.array(TransactionEntrySchema).optional().default(() => []),
+  metadata: z.record(z.string(), z.unknown()).optional().default(() => ({}))
 });
 
 // src/utils/normalize.ts
@@ -158,7 +158,7 @@ function extractSignals(rawComplaint) {
   const amountMatches = [];
   let amountMatch;
   while ((amountMatch = amountPattern.exec(normalized)) !== null) {
-    const num = parseFloat(amountMatch[1].replace(/,/g, ""));
+    const num = parseFloat((amountMatch[1] ?? "").replace(/,/g, ""));
     if (!isNaN(num) && num > 0) amountMatches.push(num);
   }
   const mentionedAmounts = [...new Set(amountMatches)];
@@ -216,6 +216,25 @@ function extractSignals(rawComplaint) {
     "need refund"
   ];
   const hasRefundSignal = refundKeywords.some((kw) => normalized.includes(kw));
+  const buyersRemorseKeywords = [
+    "changed my mind",
+    "don't want",
+    "do not want",
+    "no longer want",
+    "want to cancel",
+    "cancel my order",
+    "cancel order",
+    "cancelled order",
+    "i don't need",
+    "i do not need",
+    "decided not to",
+    "won't buy",
+    "\u09AE\u09A8 \u09AA\u09B0\u09BF\u09AC\u09B0\u09CD\u09A4\u09A8",
+    "\u0986\u09B0 \u099A\u09BE\u0987 \u09A8\u09BE",
+    "\u09AC\u09BE\u09A4\u09BF\u09B2 \u0995\u09B0\u09A4\u09C7 \u099A\u09BE\u0987",
+    "\u0995\u09BF\u09A8\u09AC \u09A8\u09BE"
+  ];
+  const hasBuyersRemorseSignal = buyersRemorseKeywords.some((kw) => normalized.includes(kw));
   const wrongTransferKeywords = [
     "wrong number",
     "wrong recipient",
@@ -348,6 +367,7 @@ function extractSignals(rawComplaint) {
     hasPinOtpPasswordSignal,
     hasScamSignal,
     hasRefundSignal,
+    hasBuyersRemorseSignal,
     hasWrongTransferSignal,
     hasFailedPaymentSignal,
     hasDuplicateSignal,
@@ -379,6 +399,48 @@ function classifyCaseType(signals) {
   if (signals.hasRefundSignal) return "refund_request";
   if (signals.hasFailedPaymentSignal) return "payment_failed";
   return "other";
+}
+function detectMultiTransactionAnomalies(transactions, caseType) {
+  if (!transactions || transactions.length < 2) {
+    return { type: "none", transactions: [], description: "" };
+  }
+  const transfers = transactions.filter((t) => t.type === "transfer" || t.type === "payment");
+  if (transfers.length >= 2) {
+    const byAmount = /* @__PURE__ */ new Map();
+    for (const t of transfers) {
+      if (t.amount === void 0) continue;
+      const existing = byAmount.get(t.amount) ?? [];
+      existing.push(t);
+      byAmount.set(t.amount, existing);
+    }
+    for (const [, group] of byAmount) {
+      if (group.length >= 2) {
+        const counterparties = [...new Set(group.map((t) => t.counterparty).filter(Boolean))];
+        if (counterparties.length >= 2) {
+          return {
+            type: "multiple_same_amount_different_recipients",
+            transactions: group,
+            description: `Found ${group.length} transfers of ${fmt(group[0]?.amount)} to ${counterparties.length} different recipients: ${counterparties.join(", ")}. This pattern suggests a possible wrong transfer or unintended duplicate.`
+          };
+        }
+      }
+    }
+  }
+  const completedTransfers = transfers.filter((t) => t.status === "completed");
+  const failedTransfers = transfers.filter((t) => t.status === "failed");
+  for (const failed of failedTransfers) {
+    const matchingCompleted = completedTransfers.find(
+      (c) => c.counterparty === failed.counterparty && Math.abs((c.amount ?? 0) - (failed.amount ?? 0)) < 1
+    );
+    if (matchingCompleted) {
+      return {
+        type: "failed_after_completed",
+        transactions: [matchingCompleted, failed],
+        description: `A transfer of ${fmt(failed.amount)} to ${failed.counterparty} was completed (${matchingCompleted.transaction_id}) but a subsequent retry (${failed.transaction_id}) failed. The original transfer likely went through \u2014 the failed retry may have caused confusion.`
+      };
+    }
+  }
+  return { type: "none", transactions: [], description: "" };
 }
 var TYPE_ALIGNMENT = {
   wrong_transfer: ["transfer"],
@@ -591,9 +653,16 @@ function determineHumanReview(caseType, severity, evidenceVerdict, txn, signals)
   if (caseType === "other" && (signals.hasBalanceIssueSignal || signals.hasCashOutSignal)) return true;
   return false;
 }
-function generateAgentSummary(caseType, evidenceVerdict, department, txn, signals) {
+function generateAgentSummary(caseType, evidenceVerdict, department, txn, signals, transactions, anomaly, isBuyersRemorse) {
   const caseLabel = caseType.replace(/_/g, " ");
   const dept = department.replace(/_/g, " ");
+  if (anomaly.type !== "none" && anomaly.transactions.length > 0) {
+    const txnList = anomaly.transactions.map((t) => `${t.transaction_id} (${fmtType(t.type)}, ${fmt(t.amount ?? 0)} \u2192 ${t.counterparty ?? "unknown"}, ${t.status})`).join(" | ");
+    return `Customer reports a ${caseLabel} issue. ANOMALY DETECTED \u2014 ${anomaly.description} Affected transactions: [${txnList}]. Evidence verdict: ${evidenceVerdict}. Manual investigation required \u2014 case routed to ${dept}.`;
+  }
+  if (isBuyersRemorse && caseType === "refund_request" && txn) {
+    return `Customer requests a refund of ${fmt(txn.amount)} for transaction ${txn.transaction_id} (${fmtType(txn.type)} to ${txn.counterparty ?? "merchant"}, status: ${txn.status ?? "unknown"}). BUYER'S REMORSE DETECTED \u2014 customer explicitly states they changed their mind / no longer want the product. This is a voluntary cancellation, not a system failure. Platform refund policy likely does not apply. Agent should advise customer to contact the merchant directly. Case routed to ${dept}.`;
+  }
   if (txn) {
     const txnAmount = fmt(txn.amount);
     const txnType = fmtType(txn.type);
@@ -609,6 +678,11 @@ function generateAgentSummary(caseType, evidenceVerdict, department, txn, signal
       verdictNote = "Evidence is present but additional verification is needed";
     }
     return `Customer reports a ${caseLabel} issue. Matched transaction: ${txn.transaction_id} (${txnType}, ${txnAmount}${txnCp}, status: ${txnStatus}${txnTs}). ${verdictNote}. Case routed to ${dept}.`;
+  }
+  if (caseType === "other" && transactions.length > 0) {
+    const recentTxns = transactions.slice(-3).map((t) => `${t.transaction_id} (${fmtType(t.type)}, ${fmt(t.amount)}, ${t.status})`).join("; ");
+    const amountHint2 = signals.mentionedAmounts.length > 0 ? ` Customer mentioned approximately ${fmt(Math.max(...signals.mentionedAmounts))}.` : "";
+    return `Customer reports an unspecified financial concern.${amountHint2} No specific keywords matched a known case type. Recent account activity on file: [${recentTxns}]. Agent should review these transactions with the customer and probe for the exact issue. Case routed to ${dept}.`;
   }
   const amountHint = signals.mentionedAmounts.length > 0 ? ` involving approximately ${fmt(Math.max(...signals.mentionedAmounts))}` : "";
   const cpHint = signals.mentionedCounterparties.length > 0 ? ` with counterparty ${signals.mentionedCounterparties[0]}` : "";
@@ -635,24 +709,158 @@ function generateRecommendedNextAction(caseType, evidenceVerdict, txn) {
       return evidenceVerdict === "insufficient_data" ? `Request non-sensitive clarifying details: approximate time, amount${txnRef ? "" : ", or transaction reference"}. Do not request PIN, OTP, password, or card details.` : `Review available information${txnRef} and follow standard support workflow. Escalate if issue persists.`;
   }
 }
-function generateCustomerReply(caseType) {
+function fmtCp(cp) {
+  if (!cp) return "the recipient";
+  if (cp.startsWith("+88") || cp.startsWith("01")) return `the number ${cp}`;
+  if (cp.toUpperCase().startsWith("MERCHANT")) return `merchant ${cp}`;
+  if (cp.toUpperCase().startsWith("AGENT")) return `agent ${cp}`;
+  return cp;
+}
+function generateCustomerReply(caseType, language = "en", ctx = {}) {
+  const { txnId, amount, counterparty, isBuyersRemorse, evidenceVerdict, anomaly } = ctx;
+  const txnRef = txnId ? ` (${txnId})` : "";
+  const amtFmt = amount ? fmt(amount) : null;
+  const cpFmt = fmtCp(counterparty);
+  const amtSent = amtFmt ? `${amtFmt}` : "the amount";
+  const isInconsistent = evidenceVerdict === "inconsistent";
+  if (language === "en") {
+    switch (caseType) {
+      case "wrong_transfer": {
+        const opening = amtFmt ? `We can see a transfer of ${amtFmt} was sent${counterparty ? ` to ${cpFmt}` : ""}${txnRef}.` : `We've received your report${txnRef} about the transfer.`;
+        const status = isInconsistent ? `Our records currently show the transfer did not go through, but we're checking further to be sure.` : `Our records show the transfer was processed \u2014 our Dispute Resolution team will now investigate to confirm where the funds landed.`;
+        return `Hi there! We're really sorry to hear about this \u2014 we completely understand how stressful this must be. ${opening} ${status} We'll keep you posted every step of the way and do everything possible to help. Please remember \u2014 our team will never ask for your PIN, OTP, or password. Don't share these with anyone.`;
+      }
+      case "payment_failed": {
+        const opening = amtFmt ? `We can see a payment of ${amtFmt}${counterparty ? ` to ${cpFmt}` : ""}${txnRef} in your account.` : `We've received your report${txnRef} about the payment.`;
+        const status = isInconsistent ? `Interestingly, our records indicate the payment may have gone through on our end \u2014 but we'll investigate further to make sure the full picture is clear.` : `The transaction appears to have encountered an issue on our end, and our Payments team is already on it.`;
+        return `We're really sorry to hear your payment didn't go through as expected. ${opening} ${status} If any amount was deducted and the service wasn't delivered, rest assured it will be handled according to our policy. We'll get back to you very soon. Please don't share your PIN or OTP with anyone.`;
+      }
+      case "refund_request": {
+        if (isBuyersRemorse) {
+          const merchantLine = counterparty ? `to ${cpFmt}` : `to the merchant`;
+          return `Thank you for reaching out! We appreciate your honesty \u2014 we understand that sometimes plans change. However, we'd like to let you know that your payment of ${amtSent} ${merchantLine}${txnRef} was successfully completed, which means the funds have already been transferred to them. Unfortunately, our platform policy does not allow reversals based on a change of mind, since the merchant has already received the payment. We'd recommend reaching out directly to the merchant \u2014 they may be able to offer a refund or exchange. If you believe there was a technical error with the transaction itself, please let us know and we'll gladly look into it.`;
+        }
+        const opening = amtFmt ? `We've received your refund request for ${amtFmt}${counterparty ? ` paid to ${cpFmt}` : ""}${txnRef}.` : `We've received your refund request${txnRef}.`;
+        return `${opening} We truly understand how important this is for you, and we're treating it with priority. Our team is reviewing the transaction details right now and will verify eligibility as quickly as possible. Refund decisions are subject to our official policy and may require a brief verification window. We appreciate your patience \u2014 we'll keep you updated. Please do not share your PIN or OTP with anyone.`;
+      }
+      case "duplicate_payment": {
+        const opening = amtFmt ? `We can see a payment of ${amtFmt}${counterparty ? ` to ${cpFmt}` : ""}${txnRef} in your records.` : `We've received your report${txnRef} about the possible duplicate.`;
+        return `We completely understand how worrying a double charge can be \u2014 and we want to sort this out for you right away! ${opening} Our Payments team will now carefully review all relevant records to confirm whether a duplicate deduction actually occurred. If a double charge is confirmed, it will be corrected through our official process. We'll update you as soon as we have a finding.`;
+      }
+      case "merchant_settlement_delay": {
+        const opening = amtFmt ? `We've noted your concern about the delayed settlement of ${amtFmt}${txnRef}.` : `We've noted your settlement concern${txnRef}.`;
+        return `We're sorry for the inconvenience \u2014 we know how critical timely settlements are for your business. ${opening} Our Merchant Operations team will review the settlement batch status immediately and follow up through official channels. We appreciate your patience and will get back to you as soon as possible.`;
+      }
+      case "agent_cash_in_issue": {
+        const opening = amtFmt ? `We can see a cash-in of ${amtFmt}${counterparty ? ` via ${cpFmt}` : ""}${txnRef} in your history.` : `We've received your cash-in report${txnRef}.`;
+        return `We're sorry your balance hasn't updated yet \u2014 that's definitely frustrating and we understand your concern. ${opening} Our Agent Operations team will verify the transaction against our ledger right away. If there's any discrepancy, we'll follow the proper procedure to get it credited to your account. We'll be in touch shortly.`;
+      }
+      case "phishing_or_social_engineering":
+        return `Thank you for reporting this immediately \u2014 you absolutely did the right thing. We want to be very clear: our team will NEVER ask for your PIN, OTP, password, or any verification code \u2014 not through calls, messages, or any channel. Please do NOT share these details with anyone, even if they claim to be from our support team. We've flagged this incident for our Fraud & Risk team to investigate urgently. If you think your account may have been accessed without your permission, please change your PIN right now through the app.`;
+      default: {
+        if (anomaly && anomaly.type === "multiple_same_amount_different_recipients") {
+          const txnCount = anomaly.transactions.length;
+          const amountMentioned = anomaly.transactions[0]?.amount;
+          const uniqueCps = [...new Set(anomaly.transactions.map((t) => t.counterparty).filter(Boolean))];
+          return `Thank you for getting in touch \u2014 we understand something doesn't feel right about your account activity, and we take that very seriously. Looking at your recent history, we can see ${txnCount} transfer${txnCount > 1 ? "s" : ""} of ${amountMentioned ? fmt(amountMentioned) : "the same amount"} going to ${uniqueCps.length > 1 ? `${uniqueCps.length} different recipients (${uniqueCps.join(", ")})` : "the same recipient"}, which looks unusual. Our support team will review this carefully and get back to you with a clear explanation of what happened and what the next steps are. Please do not share your PIN or OTP with anyone while we investigate.`;
+        }
+        if (anomaly && anomaly.type === "failed_after_completed") {
+          const completedTxn = anomaly.transactions[0];
+          const failedTxn = anomaly.transactions[1];
+          return `Thank you for reaching out \u2014 we can see why this is confusing. Looking at your transaction history, it appears a transfer${completedTxn?.amount ? ` of ${fmt(completedTxn.amount)}` : ""} to ${fmtCp(completedTxn?.counterparty)} was successfully completed${completedTxn?.transaction_id ? ` (${completedTxn.transaction_id})` : ""}, but a follow-up attempt${failedTxn?.transaction_id ? ` (${failedTxn.transaction_id})` : ""} did not go through. This may be why the recipient appears not to have received the money \u2014 the original transfer likely did go through. Our team will investigate and confirm the exact status. Please do not share your PIN or OTP with anyone.`;
+        }
+        return `Thank you for reaching out to us! We understand you have a concern about your account and we genuinely want to help. To make sure we look into the right transaction, could you share a bit more detail \u2014 such as the approximate date, the amount involved, or who you sent it to? This will help our team investigate much faster. In the meantime, please do not share your PIN or OTP with anyone.`;
+      }
+    }
+  }
+  if (language === "bn") {
+    switch (caseType) {
+      case "wrong_transfer": {
+        const opening = amtFmt ? `\u0986\u09AE\u09B0\u09BE \u09A6\u09C7\u0996\u09A4\u09C7 \u09AA\u09BE\u099A\u09CD\u099B\u09BF ${amtFmt} \u098F\u09B0 \u098F\u0995\u099F\u09BF \u099F\u09CD\u09B0\u09BE\u09A8\u09CD\u09B8\u09AB\u09BE\u09B0${counterparty ? ` ${cpFmt}-\u098F` : ""} \u09B8\u09AE\u09CD\u09AA\u09A8\u09CD\u09A8 \u09B9\u09AF\u09BC\u09C7\u099B\u09C7${txnRef}\u0964` : `\u0986\u09AA\u09A8\u09BE\u09B0 \u0985\u09AD\u09BF\u09AF\u09CB\u0997${txnRef} \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u0995\u09BE\u099B\u09C7 \u09AA\u09CC\u0981\u099B\u09C7\u099B\u09C7\u0964`;
+        return `\u0986\u09AA\u09A8\u09BE\u09B0 \u0985\u09AD\u09BF\u09AF\u09CB\u0997 \u09AA\u09C7\u09AF\u09BC\u09C7 \u0986\u09AE\u09B0\u09BE \u09B8\u09A4\u09CD\u09AF\u09BF\u0987 \u09A6\u09C1\u0983\u0996\u09BF\u09A4 \u2014 \u098F\u0987 \u09AA\u09B0\u09BF\u09B8\u09CD\u09A5\u09BF\u09A4\u09BF \u0995\u09A4\u099F\u09BE \u0989\u09A6\u09CD\u09AC\u09C7\u0997\u099C\u09A8\u0995 \u09A4\u09BE \u0986\u09AE\u09B0\u09BE \u09AC\u09C1\u099D\u09A4\u09C7 \u09AA\u09BE\u09B0\u099B\u09BF\u0964 ${opening} \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u09A1\u09BF\u09B8\u09AA\u09BF\u0989\u099F \u09B0\u09C7\u099C\u09CB\u09B2\u09BF\u0989\u09B6\u09A8 \u09A6\u09B2 \u098F\u099F\u09BF \u0985\u0997\u09CD\u09B0\u09BE\u09A7\u09BF\u0995\u09BE\u09B0\u09C7\u09B0 \u09AD\u09BF\u09A4\u09CD\u09A4\u09BF\u09A4\u09C7 \u09A4\u09A6\u09A8\u09CD\u09A4 \u0995\u09B0\u09AC\u09C7\u0964 \u09AA\u09CD\u09B0\u09A4\u09BF\u099F\u09BF \u09AA\u09A6\u0995\u09CD\u09B7\u09C7\u09AA\u09C7 \u0986\u09AA\u09A8\u09BE\u0995\u09C7 \u0986\u09AA\u09A1\u09C7\u099F \u099C\u09BE\u09A8\u09BE\u09A8\u09CB \u09B9\u09AC\u09C7\u0964 \u09AE\u09A8\u09C7 \u09B0\u09BE\u0996\u09AC\u09C7\u09A8, \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u0995\u09CB\u09A8\u09CB \u09AA\u09CD\u09B0\u09A4\u09BF\u09A8\u09BF\u09A7\u09BF \u0986\u09AA\u09A8\u09BE\u09B0 \u09AA\u09BF\u09A8, \u0993\u099F\u09BF\u09AA\u09BF \u09AC\u09BE \u09AA\u09BE\u09B8\u0993\u09AF\u09BC\u09BE\u09B0\u09CD\u09A1 \u099A\u09BE\u0987\u09AC\u09C7\u09A8 \u09A8\u09BE\u0964`;
+      }
+      case "payment_failed": {
+        const opening = amtFmt ? `\u0986\u09AE\u09B0\u09BE \u09A6\u09C7\u0996\u09A4\u09C7 \u09AA\u09BE\u099A\u09CD\u099B\u09BF ${amtFmt} \u098F\u09B0 \u098F\u0995\u099F\u09BF \u09AA\u09C7\u09AE\u09C7\u09A8\u09CD\u099F${txnRef} \u09AA\u09CD\u09B0\u0995\u09CD\u09B0\u09BF\u09AF\u09BC\u09BE\u0995\u09B0\u09A3\u09C7\u09B0 \u09B8\u09AE\u09AF\u09BC \u09B8\u09AE\u09B8\u09CD\u09AF\u09BE \u09B9\u09AF\u09BC\u09C7\u099B\u09C7\u0964` : `\u0986\u09AA\u09A8\u09BE\u09B0 \u09AA\u09C7\u09AE\u09C7\u09A8\u09CD\u099F \u0985\u09AD\u09BF\u09AF\u09CB\u0997${txnRef} \u0986\u09AE\u09B0\u09BE \u09AA\u09C7\u09AF\u09BC\u09C7\u099B\u09BF\u0964`;
+        return `\u0986\u09AA\u09A8\u09BE\u09B0 \u09AA\u09C7\u09AE\u09C7\u09A8\u09CD\u099F \u09B8\u09AB\u09B2 \u09A8\u09BE \u09B9\u0993\u09AF\u09BC\u09BE\u09AF\u09BC \u0986\u09AE\u09B0\u09BE \u0986\u09A8\u09CD\u09A4\u09B0\u09BF\u0995\u09AD\u09BE\u09AC\u09C7 \u09A6\u09C1\u0983\u0996\u09BF\u09A4\u0964 ${opening} \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u09AA\u09C7\u09AE\u09C7\u09A8\u09CD\u099F\u09B8 \u09A6\u09B2 \u098F\u099F\u09BF \u098F\u0996\u09A8\u0987 \u09AA\u09B0\u09CD\u09AF\u09BE\u09B2\u09CB\u099A\u09A8\u09BE \u0995\u09B0\u099B\u09C7\u09A8\u0964 \u09AF\u09A6\u09BF \u0986\u09AA\u09A8\u09BE\u09B0 \u0985\u09CD\u09AF\u09BE\u0995\u09BE\u0989\u09A8\u09CD\u099F \u09A5\u09C7\u0995\u09C7 \u099F\u09BE\u0995\u09BE \u0995\u09BE\u099F\u09BE \u09B9\u09AF\u09BC\u09C7 \u09A5\u09BE\u0995\u09C7, \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u09A8\u09C0\u09A4\u09BF\u09AE\u09BE\u09B2\u09BE \u0985\u09A8\u09C1\u09AF\u09BE\u09AF\u09BC\u09C0 \u09A4\u09BE \u09B8\u09AE\u09BE\u09A7\u09BE\u09A8 \u0995\u09B0\u09BE \u09B9\u09AC\u09C7\u0964 \u09B6\u09C0\u0998\u09CD\u09B0\u0987 \u0986\u09AA\u09A8\u09BE\u0995\u09C7 \u0986\u09AA\u09A1\u09C7\u099F \u099C\u09BE\u09A8\u09BE\u09A8\u09CB \u09B9\u09AC\u09C7\u0964 \u09AA\u09BF\u09A8 \u09AC\u09BE \u0993\u099F\u09BF\u09AA\u09BF \u0995\u09BE\u09B0\u09CB \u09B8\u09BE\u09A5\u09C7 \u09B6\u09C7\u09AF\u09BC\u09BE\u09B0 \u0995\u09B0\u09AC\u09C7\u09A8 \u09A8\u09BE\u0964`;
+      }
+      case "refund_request": {
+        if (isBuyersRemorse) {
+          return `\u0986\u09AA\u09A8\u09BE\u09B0 \u09B8\u09BE\u09A5\u09C7 \u09AF\u09CB\u0997\u09BE\u09AF\u09CB\u0997 \u0995\u09B0\u09BE\u09B0 \u099C\u09A8\u09CD\u09AF \u09A7\u09A8\u09CD\u09AF\u09AC\u09BE\u09A6\u0964 \u0986\u09AE\u09B0\u09BE \u09AC\u09C1\u099D\u09A4\u09C7 \u09AA\u09BE\u09B0\u099B\u09BF \u0995\u0996\u09A8\u09CB \u0995\u0996\u09A8\u09CB \u09AE\u09A8 \u09AA\u09B0\u09BF\u09AC\u09B0\u09CD\u09A4\u09A8 \u09B9\u09AF\u09BC\u0964 \u09A4\u09AC\u09C7 \u099C\u09BE\u09A8\u09BE\u09A4\u09C7 \u099A\u09BE\u0987, ${amtFmt ? `${amtFmt} \u098F\u09B0` : "\u098F\u0987"} \u09AA\u09C7\u09AE\u09C7\u09A8\u09CD\u099F\u099F\u09BF${counterparty ? ` ${cpFmt}-\u0995\u09C7` : " \u09AE\u09BE\u09B0\u09CD\u099A\u09C7\u09A8\u09CD\u099F\u0995\u09C7"} \u09B8\u09AB\u09B2\u09AD\u09BE\u09AC\u09C7 \u09AA\u09BE\u09A0\u09BE\u09A8\u09CB \u09B9\u09AF\u09BC\u09C7 \u0997\u09C7\u099B\u09C7${txnRef}\u0964 \u09B6\u09C1\u09A7\u09C1\u09AE\u09BE\u09A4\u09CD\u09B0 \u09AE\u09A8 \u09AA\u09B0\u09BF\u09AC\u09B0\u09CD\u09A4\u09A8\u09C7\u09B0 \u0995\u09BE\u09B0\u09A3\u09C7 \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u09AA\u09CD\u09B2\u09CD\u09AF\u09BE\u099F\u09AB\u09B0\u09CD\u09AE\u09C7\u09B0 \u09AA\u0995\u09CD\u09B7\u09C7 \u098F\u0987 \u09B2\u09C7\u09A8\u09A6\u09C7\u09A8 \u09AC\u09BE\u09A4\u09BF\u09B2 \u0995\u09B0\u09BE \u09B8\u09AE\u09CD\u09AD\u09AC \u09A8\u09AF\u09BC\u0964 \u09AE\u09BE\u09B0\u09CD\u099A\u09C7\u09A8\u09CD\u099F\u09C7\u09B0 \u09B8\u09BE\u09A5\u09C7 \u09B8\u09B0\u09BE\u09B8\u09B0\u09BF \u09AF\u09CB\u0997\u09BE\u09AF\u09CB\u0997 \u0995\u09B0\u09B2\u09C7 \u09A4\u09BE\u09B0\u09BE \u09B8\u09BE\u09B9\u09BE\u09AF\u09CD\u09AF \u0995\u09B0\u09A4\u09C7 \u09AA\u09BE\u09B0\u09AC\u09C7\u09A8\u0964 \u09B2\u09C7\u09A8\u09A6\u09C7\u09A8\u09C7 \u0995\u09CB\u09A8\u09CB \u09AA\u09CD\u09B0\u09AF\u09C1\u0995\u09CD\u09A4\u09BF\u0997\u09A4 \u09B8\u09AE\u09B8\u09CD\u09AF\u09BE \u09A5\u09BE\u0995\u09B2\u09C7 \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u099C\u09BE\u09A8\u09BE\u09A8\u0964`;
+        }
+        const opening = amtFmt ? `${amtFmt} \u098F\u09B0 \u09B0\u09BF\u09AB\u09BE\u09A8\u09CD\u09A1 \u0985\u09A8\u09C1\u09B0\u09CB\u09A7${txnRef} \u0986\u09AE\u09B0\u09BE \u09AA\u09C7\u09AF\u09BC\u09C7\u099B\u09BF\u0964` : `\u0986\u09AA\u09A8\u09BE\u09B0 \u09B0\u09BF\u09AB\u09BE\u09A8\u09CD\u09A1 \u0985\u09A8\u09C1\u09B0\u09CB\u09A7${txnRef} \u09AA\u09C7\u09AF\u09BC\u09C7\u099B\u09BF\u0964`;
+        return `${opening} \u098F\u099F\u09BF \u0986\u09AA\u09A8\u09BE\u09B0 \u099C\u09A8\u09CD\u09AF \u0995\u09A4\u099F\u09BE \u0997\u09C1\u09B0\u09C1\u09A4\u09CD\u09AC\u09AA\u09C2\u09B0\u09CD\u09A3 \u09A4\u09BE \u0986\u09AE\u09B0\u09BE \u09AC\u09C1\u099D\u09BF \u098F\u09AC\u0982 \u098F\u099F\u09BF\u0995\u09C7 \u0985\u0997\u09CD\u09B0\u09BE\u09A7\u09BF\u0995\u09BE\u09B0 \u09A6\u09BF\u099A\u09CD\u099B\u09BF\u0964 \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u09A6\u09B2 \u09B2\u09C7\u09A8\u09A6\u09C7\u09A8\u09C7\u09B0 \u09AC\u09BF\u09AC\u09B0\u09A3 \u09AF\u09BE\u099A\u09BE\u0987 \u0995\u09B0\u09C7 \u09AF\u09A4 \u09A6\u09CD\u09B0\u09C1\u09A4 \u09B8\u09AE\u09CD\u09AD\u09AC \u09B8\u09BF\u09A6\u09CD\u09A7\u09BE\u09A8\u09CD\u09A4 \u09A8\u09C7\u09AC\u09C7\u0964 \u0986\u09AA\u09A8\u09BE\u09B0 \u09A7\u09C8\u09B0\u09CD\u09AF\u09C7\u09B0 \u099C\u09A8\u09CD\u09AF \u09A7\u09A8\u09CD\u09AF\u09AC\u09BE\u09A6 \u2014 \u0986\u09AE\u09B0\u09BE \u09AA\u09CD\u09B0\u09A4\u09BF\u099F\u09BF \u0986\u09AA\u09A1\u09C7\u099F \u099C\u09BE\u09A8\u09BE\u09AC\u0964 \u09AA\u09BF\u09A8 \u09AC\u09BE \u0993\u099F\u09BF\u09AA\u09BF \u0995\u09BE\u09B0\u09CB \u09B8\u09BE\u09A5\u09C7 \u09B6\u09C7\u09AF\u09BC\u09BE\u09B0 \u0995\u09B0\u09AC\u09C7\u09A8 \u09A8\u09BE\u0964`;
+      }
+      case "duplicate_payment": {
+        const opening = amtFmt ? `\u0986\u09AE\u09B0\u09BE \u09A6\u09C7\u0996\u09A4\u09C7 \u09AA\u09BE\u099A\u09CD\u099B\u09BF ${amtFmt} \u098F\u09B0 \u09AA\u09C7\u09AE\u09C7\u09A8\u09CD\u099F\u099F\u09BF${txnRef} \u09A8\u09BF\u09AF\u09BC\u09C7 \u0986\u09AA\u09A8\u09BE\u09B0 \u0989\u09A6\u09CD\u09AC\u09C7\u0997 \u09B0\u09AF\u09BC\u09C7\u099B\u09C7\u0964` : `\u09A6\u09C1\u0987\u09AC\u09BE\u09B0 \u099A\u09BE\u09B0\u09CD\u099C \u09B9\u0993\u09AF\u09BC\u09BE\u09B0 \u0985\u09AD\u09BF\u09AF\u09CB\u0997${txnRef} \u0986\u09AE\u09B0\u09BE \u09AA\u09C7\u09AF\u09BC\u09C7\u099B\u09BF\u0964`;
+        return `\u09A6\u09C1\u0987\u09AC\u09BE\u09B0 \u099A\u09BE\u09B0\u09CD\u099C \u09B9\u0993\u09AF\u09BC\u09BE\u09B0 \u09AC\u09BF\u09B7\u09AF\u09BC\u099F\u09BF \u09B8\u09A4\u09CD\u09AF\u09BF\u0987 \u0989\u09A6\u09CD\u09AC\u09C7\u0997\u099C\u09A8\u0995 \u2014 \u098F\u099F\u09BF \u09AC\u09C1\u099D\u09A4\u09C7 \u09AA\u09BE\u09B0\u099B\u09BF\u0964 ${opening} \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u09AA\u09C7\u09AE\u09C7\u09A8\u09CD\u099F\u09B8 \u09A6\u09B2 \u09B8\u09AE\u09B8\u09CD\u09A4 \u09AA\u09CD\u09B0\u09BE\u09B8\u0999\u09CD\u0997\u09BF\u0995 \u09B0\u09C7\u0995\u09B0\u09CD\u09A1 \u09AA\u09B0\u09CD\u09AF\u09BE\u09B2\u09CB\u099A\u09A8\u09BE \u0995\u09B0\u09AC\u09C7\u09A8\u0964 \u09A1\u09C1\u09AA\u09CD\u09B2\u09BF\u0995\u09C7\u099F \u099A\u09BE\u09B0\u09CD\u099C \u09A8\u09BF\u09B6\u09CD\u099A\u09BF\u09A4 \u09B9\u09B2\u09C7 \u09AA\u09CD\u09B0\u09AF\u09BC\u09CB\u099C\u09A8\u09C0\u09AF\u09BC \u09AC\u09CD\u09AF\u09AC\u09B8\u09CD\u09A5\u09BE \u09A8\u09C7\u0993\u09AF\u09BC\u09BE \u09B9\u09AC\u09C7\u0964 \u09B6\u09C0\u0998\u09CD\u09B0\u0987 \u0986\u09AA\u09A8\u09BE\u0995\u09C7 \u0986\u09AA\u09A1\u09C7\u099F \u099C\u09BE\u09A8\u09BE\u09AC\u0964`;
+      }
+      case "merchant_settlement_delay": {
+        const opening = amtFmt ? `${amtFmt} \u098F\u09B0 \u09B8\u09C7\u099F\u09C7\u09B2\u09AE\u09C7\u09A8\u09CD\u099F${txnRef} \u09AC\u09BF\u09B2\u09AE\u09CD\u09AC\u09BF\u09A4 \u09B9\u0993\u09AF\u09BC\u09BE\u09B0 \u09AC\u09BF\u09B7\u09AF\u09BC\u099F\u09BF \u0986\u09AE\u09B0\u09BE \u09A8\u09A5\u09BF\u09AD\u09C1\u0995\u09CD\u09A4 \u0995\u09B0\u09C7\u099B\u09BF\u0964` : `\u09AE\u09BE\u09B0\u09CD\u099A\u09C7\u09A8\u09CD\u099F \u09B8\u09C7\u099F\u09C7\u09B2\u09AE\u09C7\u09A8\u09CD\u099F \u09B8\u0982\u0995\u09CD\u09B0\u09BE\u09A8\u09CD\u09A4 \u0985\u09AD\u09BF\u09AF\u09CB\u0997${txnRef} \u09AA\u09C7\u09AF\u09BC\u09C7\u099B\u09BF\u0964`;
+        return `\u09B8\u09C7\u099F\u09C7\u09B2\u09AE\u09C7\u09A8\u09CD\u099F\u09C7 \u09A6\u09C7\u09B0\u09BF\u09B0 \u099C\u09A8\u09CD\u09AF \u0986\u09AE\u09B0\u09BE \u09A6\u09C1\u0983\u0996\u09BF\u09A4 \u2014 \u09AC\u09CD\u09AF\u09AC\u09B8\u09BE\u09B0 \u099C\u09A8\u09CD\u09AF \u09B8\u09AE\u09AF\u09BC\u09AE\u09A4\u09CB \u09B8\u09C7\u099F\u09C7\u09B2\u09AE\u09C7\u09A8\u09CD\u099F \u0995\u09A4\u099F\u09BE \u099C\u09B0\u09C1\u09B0\u09BF \u09A4\u09BE \u0986\u09AE\u09B0\u09BE \u099C\u09BE\u09A8\u09BF\u0964 ${opening} \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u09AE\u09BE\u09B0\u09CD\u099A\u09C7\u09A8\u09CD\u099F \u0985\u09AA\u09BE\u09B0\u09C7\u09B6\u09A8\u09B8 \u09A6\u09B2 \u098F\u099F\u09BF \u098F\u0996\u09A8\u0987 \u09AA\u09B0\u09CD\u09AF\u09BE\u09B2\u09CB\u099A\u09A8\u09BE \u0995\u09B0\u09AC\u09C7\u09A8\u0964 \u09A6\u09CD\u09B0\u09C1\u09A4 \u0986\u09AA\u09A1\u09C7\u099F \u09A6\u09C7\u0993\u09AF\u09BC\u09BE \u09B9\u09AC\u09C7\u0964`;
+      }
+      case "agent_cash_in_issue": {
+        const opening = amtFmt ? `\u0986\u09AE\u09B0\u09BE \u09A6\u09C7\u0996\u09A4\u09C7 \u09AA\u09BE\u099A\u09CD\u099B\u09BF ${amtFmt} \u098F\u09B0 \u0995\u09CD\u09AF\u09BE\u09B6 \u0987\u09A8${counterparty ? ` (${cpFmt})` : ""}${txnRef} \u09AC\u09CD\u09AF\u09BE\u09B2\u09C7\u09A8\u09CD\u09B8\u09C7 \u09AF\u09CB\u0997 \u09B9\u09AF\u09BC\u09A8\u09BF\u0964` : `\u0995\u09CD\u09AF\u09BE\u09B6 \u0987\u09A8 \u09B8\u0982\u0995\u09CD\u09B0\u09BE\u09A8\u09CD\u09A4 \u0985\u09AD\u09BF\u09AF\u09CB\u0997${txnRef} \u09AA\u09C7\u09AF\u09BC\u09C7\u099B\u09BF\u0964`;
+        return `\u09AC\u09CD\u09AF\u09BE\u09B2\u09C7\u09A8\u09CD\u09B8 \u0986\u09AA\u09A1\u09C7\u099F \u09A8\u09BE \u09B9\u0993\u09AF\u09BC\u09BE\u099F\u09BE \u09B8\u09A4\u09CD\u09AF\u09BF\u0987 \u09AC\u09BF\u09B0\u0995\u09CD\u09A4\u09BF\u0995\u09B0 \u2014 \u098F\u099C\u09A8\u09CD\u09AF \u0986\u09AE\u09B0\u09BE \u0986\u09A8\u09CD\u09A4\u09B0\u09BF\u0995\u09AD\u09BE\u09AC\u09C7 \u09A6\u09C1\u0983\u0996\u09BF\u09A4\u0964 ${opening} \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u098F\u099C\u09C7\u09A8\u09CD\u099F \u0985\u09AA\u09BE\u09B0\u09C7\u09B6\u09A8\u09B8 \u09A6\u09B2 \u09B2\u09C7\u099C\u09BE\u09B0\u09C7\u09B0 \u09AC\u09BF\u09AA\u09B0\u09C0\u09A4\u09C7 \u098F\u099F\u09BF \u09AF\u09BE\u099A\u09BE\u0987 \u0995\u09B0\u09AC\u09C7\u09A8 \u098F\u09AC\u0982 \u09A6\u09CD\u09B0\u09C1\u09A4 \u09B8\u09AE\u09BE\u09A7\u09BE\u09A8 \u0995\u09B0\u09AC\u09C7\u09A8\u0964 \u09B6\u09C0\u0998\u09CD\u09B0\u0987 \u09AF\u09CB\u0997\u09BE\u09AF\u09CB\u0997 \u0995\u09B0\u09BE \u09B9\u09AC\u09C7\u0964`;
+      }
+      case "phishing_or_social_engineering":
+        return `\u098F\u099F\u09BF \u09B0\u09BF\u09AA\u09CB\u09B0\u09CD\u099F \u0995\u09B0\u09BE\u09B0 \u099C\u09A8\u09CD\u09AF \u0986\u09A8\u09CD\u09A4\u09B0\u09BF\u0995 \u09A7\u09A8\u09CD\u09AF\u09AC\u09BE\u09A6 \u2014 \u0986\u09AA\u09A8\u09BF \u098F\u0995\u09A6\u09AE \u09B8\u09A0\u09BF\u0995 \u0995\u09BE\u099C \u0995\u09B0\u09C7\u099B\u09C7\u09A8\u0964 \u0986\u09AE\u09B0\u09BE \u09B8\u09CD\u09AA\u09B7\u09CD\u099F\u09AD\u09BE\u09AC\u09C7 \u099C\u09BE\u09A8\u09BE\u09A4\u09C7 \u099A\u09BE\u0987: \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u0995\u09CB\u09A8\u09CB \u09AA\u09CD\u09B0\u09A4\u09BF\u09A8\u09BF\u09A7\u09BF \u0995\u0996\u09A8\u09CB \u09AA\u09BF\u09A8, \u0993\u099F\u09BF\u09AA\u09BF, \u09AA\u09BE\u09B8\u0993\u09AF\u09BC\u09BE\u09B0\u09CD\u09A1 \u09AC\u09BE \u09AF\u09BE\u099A\u09BE\u0987\u0995\u09B0\u09A3 \u0995\u09CB\u09A1 \u099A\u09BE\u0987\u09AC\u09C7\u09A8 \u09A8\u09BE\u0964 \u0995\u09CB\u09A8\u09CB \u09AA\u09B0\u09BF\u09B8\u09CD\u09A5\u09BF\u09A4\u09BF\u09A4\u09C7\u0987 \u098F\u0987 \u09A4\u09A5\u09CD\u09AF \u0995\u09BE\u09B0\u09CB \u09B8\u09BE\u09A5\u09C7 \u09B6\u09C7\u09AF\u09BC\u09BE\u09B0 \u0995\u09B0\u09AC\u09C7\u09A8 \u09A8\u09BE\u0964 \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u09AB\u09CD\u09B0\u09A1 \u0993 \u09B0\u09BF\u09B8\u09CD\u0995 \u09A6\u09B2 \u098F\u099F\u09BF \u09A4\u09A6\u09A8\u09CD\u09A4 \u0995\u09B0\u099B\u09C7\u0964 \u0985\u09CD\u09AF\u09BE\u0995\u09BE\u0989\u09A8\u09CD\u099F \u0995\u09CD\u09B7\u09A4\u09BF\u0997\u09CD\u09B0\u09B8\u09CD\u09A4 \u09AE\u09A8\u09C7 \u09B9\u09B2\u09C7 \u098F\u0996\u09A8\u0987 \u0985\u09CD\u09AF\u09BE\u09AA \u09A5\u09C7\u0995\u09C7 \u09AA\u09BF\u09A8 \u09AA\u09B0\u09BF\u09AC\u09B0\u09CD\u09A4\u09A8 \u0995\u09B0\u09C1\u09A8\u0964`;
+      default: {
+        if (anomaly && anomaly.type === "multiple_same_amount_different_recipients") {
+          const txnCount = anomaly.transactions.length;
+          const amountMentioned = anomaly.transactions[0]?.amount;
+          return `\u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u09B8\u09BE\u09A5\u09C7 \u09AF\u09CB\u0997\u09BE\u09AF\u09CB\u0997 \u0995\u09B0\u09BE\u09B0 \u099C\u09A8\u09CD\u09AF \u09A7\u09A8\u09CD\u09AF\u09AC\u09BE\u09A6\u0964 \u0986\u09AA\u09A8\u09BE\u09B0 \u0985\u09CD\u09AF\u09BE\u0995\u09BE\u0989\u09A8\u09CD\u099F\u09C7 \u09B8\u09AE\u09CD\u09AA\u09CD\u09B0\u09A4\u09BF \u0995\u09BF\u099B\u09C1 \u0985\u09B8\u09CD\u09AC\u09BE\u09AD\u09BE\u09AC\u09BF\u0995 \u09B2\u09C7\u09A8\u09A6\u09C7\u09A8 \u09A6\u09C7\u0996\u09BE \u09AF\u09BE\u099A\u09CD\u099B\u09C7 \u2014 ${amountMentioned ? `${fmt(amountMentioned)} \u099F\u09BE\u0995\u09BE\u09B0 ` : ""}${txnCount}\u099F\u09BF \u099F\u09CD\u09B0\u09BE\u09A8\u09CD\u09B8\u09AB\u09BE\u09B0 \u09AC\u09BF\u09AD\u09BF\u09A8\u09CD\u09A8 \u09A8\u09AE\u09CD\u09AC\u09B0\u09C7 \u0997\u09C7\u099B\u09C7, \u09AF\u09BE \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u09A6\u09C3\u09B7\u09CD\u099F\u09BF\u09A4\u09C7 \u09AA\u09A1\u09BC\u09C7\u099B\u09C7\u0964 \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u09B8\u09BE\u09AA\u09CB\u09B0\u09CD\u099F \u09A6\u09B2 \u09AC\u09BF\u09B7\u09AF\u09BC\u099F\u09BF \u09AC\u09BF\u09B8\u09CD\u09A4\u09BE\u09B0\u09BF\u09A4\u09AD\u09BE\u09AC\u09C7 \u09AA\u09B0\u09CD\u09AF\u09BE\u09B2\u09CB\u099A\u09A8\u09BE \u0995\u09B0\u09AC\u09C7\u09A8 \u098F\u09AC\u0982 \u0986\u09AA\u09A8\u09BE\u0995\u09C7 \u098F\u0995\u099F\u09BF \u09B8\u09CD\u09AA\u09B7\u09CD\u099F \u09AC\u09CD\u09AF\u09BE\u0996\u09CD\u09AF\u09BE \u0993 \u09AA\u09B0\u09AC\u09B0\u09CD\u09A4\u09C0 \u09AA\u09A6\u0995\u09CD\u09B7\u09C7\u09AA \u099C\u09BE\u09A8\u09BE\u09AC\u09C7\u09A8\u0964 \u09A4\u09A6\u09A8\u09CD\u09A4\u09C7\u09B0 \u09B8\u09AE\u09AF\u09BC \u09AA\u09BF\u09A8 \u09AC\u09BE \u0993\u099F\u09BF\u09AA\u09BF \u0995\u09BE\u09B0\u09CB \u09B8\u09BE\u09A5\u09C7 \u09B6\u09C7\u09AF\u09BC\u09BE\u09B0 \u0995\u09B0\u09AC\u09C7\u09A8 \u09A8\u09BE\u0964`;
+        }
+        if (anomaly && anomaly.type === "failed_after_completed") {
+          const completedTxn = anomaly.transactions[0];
+          return `\u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u09B8\u09BE\u09A5\u09C7 \u09AF\u09CB\u0997\u09BE\u09AF\u09CB\u0997 \u0995\u09B0\u09BE\u09B0 \u099C\u09A8\u09CD\u09AF \u09A7\u09A8\u09CD\u09AF\u09AC\u09BE\u09A6 \u2014 \u098F\u0987 \u09AA\u09B0\u09BF\u09B8\u09CD\u09A5\u09BF\u09A4\u09BF \u09AC\u09BF\u09AD\u09CD\u09B0\u09BE\u09A8\u09CD\u09A4\u09BF\u0995\u09B0 \u09B9\u0993\u09AF\u09BC\u09BE\u099F\u09BE\u0987 \u09B8\u09CD\u09AC\u09BE\u09AD\u09BE\u09AC\u09BF\u0995\u0964 \u0986\u09AE\u09B0\u09BE \u09A6\u09C7\u0996\u099B\u09BF ${completedTxn?.amount ? `${fmt(completedTxn.amount)} \u099F\u09BE\u0995\u09BE\u09B0` : "\u098F\u0995\u099F\u09BF"} \u099F\u09CD\u09B0\u09BE\u09A8\u09CD\u09B8\u09AB\u09BE\u09B0 \u09B8\u09AB\u09B2\u09AD\u09BE\u09AC\u09C7 \u09B8\u09AE\u09CD\u09AA\u09A8\u09CD\u09A8 \u09B9\u09AF\u09BC\u09C7\u099B\u09C7${completedTxn?.transaction_id ? ` (${completedTxn.transaction_id})` : ""}, \u0995\u09BF\u09A8\u09CD\u09A4\u09C1 \u09AA\u09B0\u09AC\u09B0\u09CD\u09A4\u09C0 \u098F\u0995\u099F\u09BF \u09AA\u09CD\u09B0\u099A\u09C7\u09B7\u09CD\u099F\u09BE \u09AC\u09CD\u09AF\u09B0\u09CD\u09A5 \u09B9\u09AF\u09BC\u09C7\u099B\u09C7\u0964 \u09AE\u09C2\u09B2 \u099F\u09CD\u09B0\u09BE\u09A8\u09CD\u09B8\u09AB\u09BE\u09B0\u099F\u09BF \u09B8\u09AE\u09CD\u09AD\u09AC\u09A4 \u09B8\u09AB\u09B2 \u09B9\u09AF\u09BC\u09C7\u099B\u09C7\u0964 \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u09A6\u09B2 \u09AC\u09BF\u09B8\u09CD\u09A4\u09BE\u09B0\u09BF\u09A4 \u09AF\u09BE\u099A\u09BE\u0987 \u0995\u09B0\u09AC\u09C7\u09A8 \u098F\u09AC\u0982 \u09B8\u09A0\u09BF\u0995 \u09A4\u09A5\u09CD\u09AF \u099C\u09BE\u09A8\u09BE\u09AC\u09C7\u09A8\u0964 \u09AA\u09BF\u09A8 \u09AC\u09BE \u0993\u099F\u09BF\u09AA\u09BF \u0995\u09BE\u09B0\u09CB \u09B8\u09BE\u09A5\u09C7 \u09B6\u09C7\u09AF\u09BC\u09BE\u09B0 \u0995\u09B0\u09AC\u09C7\u09A8 \u09A8\u09BE\u0964`;
+        }
+        return `\u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u09B8\u09BE\u09A5\u09C7 \u09AF\u09CB\u0997\u09BE\u09AF\u09CB\u0997 \u0995\u09B0\u09BE\u09B0 \u099C\u09A8\u09CD\u09AF \u09A7\u09A8\u09CD\u09AF\u09AC\u09BE\u09A6\u0964 \u0986\u09AA\u09A8\u09BE\u09B0 \u0985\u09CD\u09AF\u09BE\u0995\u09BE\u0989\u09A8\u09CD\u099F \u09B8\u09AE\u09CD\u09AA\u09B0\u09CD\u0995\u09BF\u09A4 \u0989\u09A6\u09CD\u09AC\u09C7\u0997\u099F\u09BF \u0986\u09AE\u09B0\u09BE \u0997\u09C1\u09B0\u09C1\u09A4\u09CD\u09AC\u09C7\u09B0 \u09B8\u09BE\u09A5\u09C7 \u09A8\u09BF\u099A\u09CD\u099B\u09BF\u0964 \u09A6\u09CD\u09B0\u09C1\u09A4 \u09B8\u09AE\u09BE\u09A7\u09BE\u09A8\u09C7\u09B0 \u099C\u09A8\u09CD\u09AF \u0985\u09A8\u09C1\u0997\u09CD\u09B0\u09B9 \u0995\u09B0\u09C7 \u09A4\u09BE\u09B0\u09BF\u0996, \u09AA\u09B0\u09BF\u09AE\u09BE\u09A3 \u09AC\u09BE \u09B2\u09C7\u09A8\u09A6\u09C7\u09A8\u09C7\u09B0 \u09A7\u09B0\u09A8 \u099C\u09BE\u09A8\u09BE\u09A8 \u2014 \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u09A6\u09B2 \u09A4\u0996\u09A8 \u0986\u09B0\u09CB \u09A6\u09CD\u09B0\u09C1\u09A4 \u09B8\u09BE\u09B9\u09BE\u09AF\u09CD\u09AF \u0995\u09B0\u09A4\u09C7 \u09AA\u09BE\u09B0\u09AC\u09C7\u09A8\u0964 \u09AA\u09BF\u09A8 \u09AC\u09BE \u0993\u099F\u09BF\u09AA\u09BF \u0995\u09BE\u09B0\u09CB \u09B8\u09BE\u09A5\u09C7 \u09B6\u09C7\u09AF\u09BC\u09BE\u09B0 \u0995\u09B0\u09AC\u09C7\u09A8 \u09A8\u09BE\u0964`;
+      }
+    }
+  }
   switch (caseType) {
-    case "wrong_transfer":
-      return "We have noted your concern about the transfer. Our support team will review the transaction details through official channels. Please do not share your PIN, OTP, password, or sensitive credentials with anyone.";
-    case "payment_failed":
-      return "We have noted your concern about the payment. The transaction details will be checked through official support channels, and any eligible amount will be handled according to policy.";
-    case "refund_request":
-      return "We have received your refund-related concern. The team will verify the transaction and eligibility through official channels before any action is taken.";
-    case "duplicate_payment":
-      return "We have noted your concern about a possible duplicate payment. The relevant transaction details will be reviewed, and any eligible adjustment will be processed through official channels.";
-    case "merchant_settlement_delay":
-      return "We have noted the merchant settlement concern. The merchant operations team will review the settlement status through official records.";
-    case "agent_cash_in_issue":
-      return "We have noted your concern about the cash-in transaction. The agent operations team will review the transaction record and follow official procedures.";
+    case "wrong_transfer": {
+      const opening = amtFmt ? `${amtFmt} \u099F\u09BE${counterparty ? ` ${cpFmt}-\u098F` : ""} transfer \u09B9\u09AF\u09BC\u09C7 \u0997\u09C7\u099B\u09C7${txnRef} \u2014 \u098F\u099F\u09BE \u0986\u09AE\u09B0\u09BE \u09A6\u09C7\u0996\u09A4\u09C7 \u09AA\u09BE\u099A\u09CD\u099B\u09BF\u0964` : `\u0986\u09AA\u09A8\u09BE\u09B0 transfer \u098F\u09B0 complaint${txnRef} \u099F\u09BE \u09AA\u09C7\u09AF\u09BC\u09C7\u099B\u09BF\u0964`;
+      return `\u0986\u09AA\u09A8\u09BE\u09B0 complaint \u099F\u09BE \u09AA\u09C7\u09AF\u09BC\u09C7 \u09B8\u09A4\u09CD\u09AF\u09BF\u0987 \u0996\u09BE\u09B0\u09BE\u09AA \u09B2\u09BE\u0997\u099B\u09C7 \u2014 \u098F\u0987 situation \u098F \u0986\u09AA\u09A8\u09BF \u0995\u09A4\u099F\u09BE stressed \u09B8\u09C7\u099F\u09BE \u09AC\u09C1\u099D\u09A4\u09C7 \u09AA\u09BE\u09B0\u099B\u09BF\u0964 ${opening} \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 Dispute Resolution team \u098F\u0996\u09A8\u0987 \u098F\u099F\u09BE investigate \u0995\u09B0\u09AC\u09C7\u0964 \u09AA\u09CD\u09B0\u09A4\u09BF\u099F\u09BE step \u098F \u0986\u09AA\u09A8\u09BE\u0995\u09C7 update \u09A6\u09C7\u0993\u09AF\u09BC\u09BE \u09B9\u09AC\u09C7\u0964 Please \u0995\u0996\u09A8\u09CB PIN \u09AC\u09BE OTP \u0995\u09BE\u09B0\u09CB \u09B8\u09BE\u09A5\u09C7 share \u0995\u09B0\u09AC\u09C7\u09A8 \u09A8\u09BE\u0964`;
+    }
+    case "payment_failed": {
+      const opening = amtFmt ? `\u0986\u09AE\u09B0\u09BE \u09A6\u09C7\u0996\u09A4\u09C7 \u09AA\u09BE\u099A\u09CD\u099B\u09BF ${amtFmt} \u098F\u09B0 payment${txnRef} expected \u09AD\u09BE\u09AC\u09C7 complete \u09B9\u09AF\u09BC\u09A8\u09BF\u0964` : `\u0986\u09AA\u09A8\u09BE\u09B0 payment complaint${txnRef} \u0986\u09AE\u09B0\u09BE \u09AA\u09C7\u09AF\u09BC\u09C7\u099B\u09BF\u0964`;
+      return `Payment \u09A8\u09BE \u09B9\u0993\u09AF\u09BC\u09BE\u099F\u09BE \u09B8\u09A4\u09CD\u09AF\u09BF\u0987 frustrating \u2014 \u098F\u099F\u09BE \u0986\u09AE\u09B0\u09BE \u09AC\u09C1\u099D\u09BF\u0964 ${opening} \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 Payments team \u098F\u099F\u09BE \u098F\u0996\u09A8\u0987 review \u0995\u09B0\u099B\u09C7\u0964 Balance deduct \u09B9\u09B2\u09C7 \u09B8\u09C7\u099F\u09BE policy \u0985\u09A8\u09C1\u09AF\u09BE\u09AF\u09BC\u09C0 handle \u0995\u09B0\u09BE \u09B9\u09AC\u09C7\u0964 Shortly \u0986\u09AA\u09A8\u09BE\u0995\u09C7 update \u09A6\u09C7\u0993\u09AF\u09BC\u09BE \u09B9\u09AC\u09C7\u0964 PIN \u09AC\u09BE OTP share \u0995\u09B0\u09AC\u09C7\u09A8 \u09A8\u09BE\u0964`;
+    }
+    case "refund_request": {
+      if (isBuyersRemorse) {
+        return `\u0986\u09AA\u09A8\u09BE\u09B0 \u09B8\u09BE\u09A5\u09C7 \u09AF\u09CB\u0997\u09BE\u09AF\u09CB\u0997\u09C7\u09B0 \u099C\u09A8\u09CD\u09AF \u09A7\u09A8\u09CD\u09AF\u09AC\u09BE\u09A6\u0964 situation \u099F\u09BE \u0986\u09AE\u09B0\u09BE \u09AC\u09C1\u099D\u09A4\u09C7 \u09AA\u09BE\u09B0\u099B\u09BF\u0964 \u0995\u09BF\u09A8\u09CD\u09A4\u09C1 \u098F\u0995\u099F\u09C1 \u099C\u09BE\u09A8\u09BE\u0987 \u2014 ${amtFmt ? `${amtFmt} \u098F\u09B0` : "\u098F\u0987"} payment${counterparty ? ` ${cpFmt}-\u0995\u09C7` : " merchant \u0995\u09C7"} successfully complete \u09B9\u09AF\u09BC\u09C7 \u0997\u09C7\u099B\u09C7${txnRef}\u0964 \u09B6\u09C1\u09A7\u09C1 change of mind \u098F\u09B0 \u0995\u09BE\u09B0\u09A3\u09C7 platform \u09A5\u09C7\u0995\u09C7 refund \u0995\u09B0\u09BE \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 policy \u09A4\u09C7 \u09A8\u09C7\u0987, \u0995\u09BE\u09B0\u09A3 \u099F\u09BE\u0995\u09BE \u099A\u09B2\u09C7 \u0997\u09C7\u099B\u09C7\u0964 Merchant \u098F\u09B0 \u09B8\u09BE\u09A5\u09C7 directly \u0995\u09A5\u09BE \u09AC\u09B2\u09B2\u09C7 \u09A4\u09BE\u09B0\u09BE help \u0995\u09B0\u09A4\u09C7 \u09AA\u09BE\u09B0\u09AC\u09C7\u0964 Technical error \u09A5\u09BE\u0995\u09B2\u09C7 \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u099C\u09BE\u09A8\u09BE\u09A8\u0964`;
+      }
+      const opening = amtFmt ? `${amtFmt} \u098F\u09B0 refund request${txnRef} \u0986\u09AE\u09B0\u09BE \u09AA\u09C7\u09AF\u09BC\u09C7\u099B\u09BF\u0964` : `Refund request${txnRef} \u09AA\u09C7\u09AF\u09BC\u09C7\u099B\u09BF\u0964`;
+      return `${opening} \u099C\u09BE\u09A8\u09BF \u098F\u099F\u09BE \u0986\u09AA\u09A8\u09BE\u09B0 \u099C\u09A8\u09CD\u09AF \u0995\u09A4\u099F\u09BE important\u0964 \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 team transaction details verify \u0995\u09B0\u09AC\u09C7 \u098F\u09AC\u0982 policy \u0985\u09A8\u09C1\u09AF\u09BE\u09AF\u09BC\u09C0 \u09AF\u09A4 \u09A6\u09CD\u09B0\u09C1\u09A4 \u09B8\u09AE\u09CD\u09AD\u09AC \u09B8\u09AE\u09BE\u09A7\u09BE\u09A8 \u0995\u09B0\u09AC\u09C7\u0964 \u098F\u0995\u099F\u09C1 patience \u09B0\u09BE\u0996\u09C1\u09A8 \u2014 \u0986\u09AE\u09B0\u09BE \u0986\u09AA\u09A8\u09BE\u0995\u09C7 update \u09B0\u09BE\u0996\u09AC\u0964 PIN \u09AC\u09BE OTP share \u0995\u09B0\u09AC\u09C7\u09A8 \u09A8\u09BE\u0964`;
+    }
+    case "duplicate_payment": {
+      const opening = amtFmt ? `${amtFmt} \u098F\u09B0 double charge${txnRef} \u098F\u09B0 \u09AC\u09BF\u09B7\u09AF\u09BC\u099F\u09BE \u0986\u09AE\u09B0\u09BE \u09A6\u09C7\u0996\u099B\u09BF\u0964` : `Double charge \u098F\u09B0 complaint${txnRef} \u09AA\u09C7\u09AF\u09BC\u09C7\u099B\u09BF\u0964`;
+      return `Double charge \u09B9\u0993\u09AF\u09BC\u09BE\u099F\u09BE definitely concerning\u0964 ${opening} \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 Payments team \u09B8\u09AC transaction records review \u0995\u09B0\u09AC\u09C7 \u098F\u09AC\u0982 duplicate confirm \u09B9\u09B2\u09C7 official process \u098F handle \u0995\u09B0\u09BE \u09B9\u09AC\u09C7\u0964 \u09B6\u09C0\u0998\u09CD\u09B0\u0987 update \u0986\u09B8\u09AC\u09C7\u0964`;
+    }
+    case "merchant_settlement_delay": {
+      const opening = amtFmt ? `${amtFmt} \u098F\u09B0 settlement${txnRef} delay \u09B9\u099A\u09CD\u099B\u09C7 \u2014 \u098F\u099F\u09BE \u0986\u09AE\u09B0\u09BE \u09A6\u09C7\u0996\u099B\u09BF\u0964` : `Merchant settlement delay \u098F\u09B0 complaint${txnRef} \u09AA\u09C7\u09AF\u09BC\u09C7\u099B\u09BF\u0964`;
+      return `Merchant settlement \u098F \u09A6\u09C7\u09B0\u09BF \u09B9\u0993\u09AF\u09BC\u09BE\u099F\u09BE obviously business \u098F\u09B0 \u099C\u09A8\u09CD\u09AF problem\u0964 ${opening} \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 Merchant Operations team \u098F\u099F\u09BE \u09A6\u09C7\u0996\u09AC\u09C7 \u098F\u09AC\u0982 \u09A6\u09CD\u09B0\u09C1\u09A4 update \u09A6\u09C7\u0993\u09AF\u09BC\u09BE \u09B9\u09AC\u09C7\u0964`;
+    }
+    case "agent_cash_in_issue": {
+      const opening = amtFmt ? `\u0986\u09AE\u09B0\u09BE \u09A6\u09C7\u0996\u09A4\u09C7 \u09AA\u09BE\u099A\u09CD\u099B\u09BF ${amtFmt} \u098F\u09B0 cash in${counterparty ? ` (${cpFmt})` : ""}${txnRef} balance \u098F reflect \u09B9\u09AF\u09BC\u09A8\u09BF\u0964` : `Cash in complaint${txnRef} \u09AA\u09C7\u09AF\u09BC\u09C7\u099B\u09BF\u0964`;
+      return `Balance update \u09A8\u09BE \u09B9\u0993\u09AF\u09BC\u09BE\u099F\u09BE definitely inconvenient \u2014 \u098F\u099C\u09A8\u09CD\u09AF sorry\u0964 ${opening} \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 Agent Operations team \u098F\u099F\u09BE verify \u0995\u09B0\u09AC\u09C7 \u098F\u09AC\u0982 discrepancy \u09A5\u09BE\u0995\u09B2\u09C7 fix \u0995\u09B0\u09BE \u09B9\u09AC\u09C7\u0964 Shortly contact \u0995\u09B0\u09BE \u09B9\u09AC\u09C7\u0964`;
+    }
     case "phishing_or_social_engineering":
-      return "Please do not share your PIN, OTP, password, or verification code with anyone. We have flagged this concern for review through official support channels.";
-    default:
-      return "We have noted your concern. Our support team will review the available information and guide you through official channels.";
+      return `Report \u0995\u09B0\u09BE\u09B0 \u099C\u09A8\u09CD\u09AF \u09A7\u09A8\u09CD\u09AF\u09AC\u09BE\u09A6 \u2014 \u098F\u099F\u09BE \u0995\u09B0\u09BE \u098F\u0995\u09A6\u09AE \u09B8\u09A0\u09BF\u0995 \u099B\u09BF\u09B2\u0964 Clearly \u09AC\u09B2\u099B\u09BF: \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 team \u0995\u0996\u09A8\u09CB PIN, OTP \u09AC\u09BE password \u099A\u09BE\u0987\u09AC\u09C7 \u09A8\u09BE \u2014 \u0995\u09C7\u0989 \u099A\u09BE\u0987\u09B2\u09C7 \u09B8\u09C7\u099F\u09BE definitely scam\u0964 Share \u0995\u09B0\u09AC\u09C7\u09A8 \u09A8\u09BE\u0964 \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 Fraud team \u098F\u099F\u09BE urgently investigate \u0995\u09B0\u09AC\u09C7\u0964 Account compromise \u09B9\u09AF\u09BC\u09C7 \u09A5\u09BE\u0995\u09B2\u09C7 \u098F\u0996\u09A8\u0987 app \u09A5\u09C7\u0995\u09C7 PIN change \u0995\u09B0\u09C1\u09A8\u0964`;
+    default: {
+      if (anomaly && anomaly.type === "multiple_same_amount_different_recipients") {
+        const txnCount = anomaly.transactions.length;
+        const amountMentioned = anomaly.transactions[0]?.amount;
+        const uniqueCps = [...new Set(anomaly.transactions.map((t) => t.counterparty).filter(Boolean))];
+        return `\u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u09B8\u09BE\u09A5\u09C7 contact \u0995\u09B0\u09BE\u09B0 \u099C\u09A8\u09CD\u09AF \u09A7\u09A8\u09CD\u09AF\u09AC\u09BE\u09A6\u0964 \u0986\u09AA\u09A8\u09BE\u09B0 account \u098F \u0995\u09BF\u099B\u09C1 unusual activity \u09A6\u09C7\u0996\u09BE \u09AF\u09BE\u099A\u09CD\u099B\u09C7 \u2014 ${amountMentioned ? `${fmt(amountMentioned)} \u098F\u09B0 ` : ""}${txnCount}\u099F\u09BE transfer ${uniqueCps.length > 1 ? `${uniqueCps.length}\u099F\u09BE different number \u098F` : "same number \u098F"} \u0997\u09C7\u099B\u09C7${uniqueCps.length > 1 ? ` (${uniqueCps.join(", ")})` : ""}\u0964 \u098F\u099F\u09BE clearly investigate \u0995\u09B0\u09BE \u09A6\u09B0\u0995\u09BE\u09B0\u0964 \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 team \u09AA\u09C1\u09B0\u09CB history \u099F\u09BE carefully \u09A6\u09C7\u0996\u09AC\u09C7 \u098F\u09AC\u0982 \u0986\u09AA\u09A8\u09BE\u0995\u09C7 exactly \u0995\u09C0 \u09B9\u09AF\u09BC\u09C7\u099B\u09C7 \u09B8\u09C7\u099F\u09BE \u099C\u09BE\u09A8\u09BE\u09AC\u09C7\u0964 Please PIN \u09AC\u09BE OTP \u0995\u09BE\u09B0\u09CB \u09B8\u09BE\u09A5\u09C7 share \u0995\u09B0\u09AC\u09C7\u09A8 \u09A8\u09BE\u0964`;
+      }
+      if (anomaly && anomaly.type === "failed_after_completed") {
+        const completedTxn = anomaly.transactions[0];
+        return `Confusing situation \u099F\u09BE\u09B0 \u099C\u09A8\u09CD\u09AF \u0986\u09AE\u09B0\u09BE sorry\u0964 \u0986\u09AE\u09B0\u09BE \u09A6\u09C7\u0996\u09A4\u09C7 \u09AA\u09BE\u099A\u09CD\u099B\u09BF ${completedTxn?.amount ? `${fmt(completedTxn.amount)} \u098F\u09B0 ` : ""}\u098F\u0995\u099F\u09BE transfer successfully complete \u09B9\u09AF\u09BC\u09C7\u099B\u09C7${completedTxn?.transaction_id ? ` (${completedTxn.transaction_id})` : ""}, \u0995\u09BF\u09A8\u09CD\u09A4\u09C1 \u09AA\u09B0\u09C7\u09B0 attempt \u099F\u09BE fail \u0995\u09B0\u09C7\u099B\u09C7\u0964 Original transfer \u099F\u09BE likely \u0997\u09C7\u099B\u09C7 \u2014 \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 team confirm \u0995\u09B0\u09AC\u09C7\u0964 Update \u09A6\u09C7\u0993\u09AF\u09BC\u09BE \u09B9\u09AC\u09C7\u0964 PIN \u09AC\u09BE OTP share \u0995\u09B0\u09AC\u09C7\u09A8 \u09A8\u09BE\u0964`;
+      }
+      return `\u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u09B8\u09BE\u09A5\u09C7 contact \u0995\u09B0\u09BE\u09B0 \u099C\u09A8\u09CD\u09AF \u09A7\u09A8\u09CD\u09AF\u09AC\u09BE\u09A6! Account \u098F\u09B0 \u0995\u09CB\u09A8\u09CB concern \u0986\u099B\u09C7 \u2014 \u09B8\u09C7\u099F\u09BE \u0986\u09AE\u09B0\u09BE seriously \u09A8\u09BF\u099A\u09CD\u099B\u09BF\u0964 \u098F\u0995\u099F\u09C1 \u09AC\u09C7\u09B6\u09BF detail \u09A6\u09BF\u09B2\u09C7 \u2014 \u09AF\u09C7\u09AE\u09A8 date, amount, \u09AC\u09BE \u0995\u09CB\u09A8 transaction \u2014 \u0986\u09AE\u09BE\u09A6\u09C7\u09B0 team \u0986\u09B0\u09CB \u09A6\u09CD\u09B0\u09C1\u09A4 help \u0995\u09B0\u09A4\u09C7 \u09AA\u09BE\u09B0\u09AC\u09C7\u0964 PIN \u09AC\u09BE OTP share \u0995\u09B0\u09AC\u09C7\u09A8 \u09A8\u09BE\u0964`;
+    }
   }
 }
 function calculateConfidence(txn, txnScore, signals, evidenceVerdict, caseType) {
@@ -739,18 +947,38 @@ function applySafetyGuardrails(response, caseType, evidenceVerdict, txn) {
 }
 function analyzeTicket(input) {
   const transactions = input.transaction_history ?? [];
+  const language = input.language ?? "en";
   const signals = extractSignals(input.complaint);
   const caseType = classifyCaseType(signals);
   const { txn, score: txnScore, isDuplicate } = findRelevantTransaction(transactions, signals, caseType);
+  const anomaly = detectMultiTransactionAnomalies(transactions, caseType);
+  const isBuyersRemorse = caseType === "refund_request" && signals.hasBuyersRemorseSignal;
   const evidenceVerdict = determineEvidenceVerdict(txn, caseType, signals, transactions, isDuplicate);
   const severity = determineSeverity(caseType, evidenceVerdict, signals, txn);
   const department = determineDepartment(caseType, severity, evidenceVerdict);
   const humanReviewRequired = determineHumanReview(caseType, severity, evidenceVerdict, txn, signals);
-  const agentSummary = generateAgentSummary(caseType, evidenceVerdict, department, txn, signals);
+  const agentSummary = generateAgentSummary(
+    caseType,
+    evidenceVerdict,
+    department,
+    txn,
+    signals,
+    transactions,
+    anomaly,
+    isBuyersRemorse
+  );
   const recommendedNextAction = generateRecommendedNextAction(caseType, evidenceVerdict, txn);
-  const customerReply = generateCustomerReply(caseType);
+  const customerReply = generateCustomerReply(caseType, language, {
+    txnId: txn?.transaction_id ?? null,
+    ...txn?.amount !== void 0 ? { amount: txn.amount } : {},
+    counterparty: txn?.counterparty ?? null,
+    isBuyersRemorse,
+    anomaly
+  });
   const confidence = calculateConfidence(txn, txnScore, signals, evidenceVerdict, caseType);
   const reasonCodes = buildReasonCodes(caseType, txn, signals, evidenceVerdict, humanReviewRequired, isDuplicate, severity);
+  if (anomaly.type !== "none") reasonCodes.push("multi_transaction_anomaly_detected");
+  if (isBuyersRemorse) reasonCodes.push("buyers_remorse_detected");
   let response = {
     ticket_id: input.ticket_id,
     relevant_transaction_id: txn?.transaction_id ?? null,
@@ -763,7 +991,7 @@ function analyzeTicket(input) {
     customer_reply: customerReply,
     human_review_required: humanReviewRequired,
     confidence,
-    reason_codes: reasonCodes
+    reason_codes: [...new Set(reasonCodes)]
   };
   return applySafetyGuardrails(response, caseType, evidenceVerdict, txn);
 }
@@ -816,17 +1044,42 @@ var analyzeTicketController = async (req, res, next) => {
   try {
     const parseResult = AnalyzeTicketSchema.safeParse(req.body);
     if (!parseResult.success) {
-      const firstIssue = parseResult.error.issues[0];
+      const issues = parseResult.error.issues;
+      const firstIssue = issues[0];
+      const fieldLabels = {
+        ticket_id: "Ticket ID",
+        complaint: "Complaint",
+        language: "Language",
+        channel: "Channel",
+        user_type: "User Type",
+        transaction_history: "Transaction History",
+        campaign_context: "Campaign Context",
+        metadata: "Metadata"
+      };
       if (firstIssue?.path[0] === "complaint" && firstIssue?.code === "too_small") {
         res.status(422).json({
           error: true,
-          message: "Complaint cannot be empty"
+          message: "Your complaint message cannot be empty. Please describe your issue and try again."
         });
         return;
       }
+      const details = issues.map((issue) => {
+        const field = issue.path.length > 0 ? fieldLabels[String(issue.path[0])] ?? String(issue.path[0]) : "Request body";
+        const code = issue.code;
+        if (code === "invalid_enum_value" || code === "invalid_value") {
+          const received = issue.received ?? issue.input;
+          const options = issue.options ?? issue.values;
+          return `'${field}' has an invalid value '${received}'. Accepted values are: ${Array.isArray(options) ? options.join(", ") : "see documentation"}.`;
+        }
+        if (issue.code === "invalid_type" && issue.received === "undefined") {
+          return `'${field}' is required but was not provided.`;
+        }
+        return `'${field}': ${issue.message}`;
+      });
       res.status(400).json({
         error: true,
-        message: "Invalid request body: " + parseResult.error.issues.map((i) => i.message).join(", ")
+        message: "We were unable to process your request due to invalid input. Please review the details below and try again.",
+        details
       });
       return;
     }
@@ -834,7 +1087,7 @@ var analyzeTicketController = async (req, res, next) => {
     if (!input.complaint.trim()) {
       res.status(422).json({
         error: true,
-        message: "Complaint cannot be empty or whitespace"
+        message: "Your complaint message cannot be empty or contain only spaces. Please describe your issue and try again."
       });
       return;
     }
@@ -854,7 +1107,7 @@ var analyzeTicketController = async (req, res, next) => {
     if (err instanceof ZodError) {
       res.status(400).json({
         error: true,
-        message: "Invalid request format"
+        message: "We received a request in an unexpected format. Please check your input and try again."
       });
       return;
     }
