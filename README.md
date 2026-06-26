@@ -46,6 +46,58 @@ The engine performs:
 
 An optional OpenRouter helper exists in `src/utils/aiResponse.ts`, but it is not used by the core challenge endpoint.
 
+### LLM Model Used
+
+The core `/analyze-ticket` API does **not** use an LLM model. Its effective "model" is the local deterministic rule-based analysis engine in `src/modules/analyze-ticket/analyze-ticket.engine.ts`.
+
+For optional/manual AI utility testing, the project references OpenRouter chat-completion models. The explicit model used in `src/scripts/testAiResponse.ts` is:
+
+```text
+google/gemma-4-31b-it:free
+```
+
+When no model is passed to `getAiResponse`, the helper can cycle through the configured free OpenRouter model list in `src/utils/aiResponse.ts`, including `openrouter/owl-alpha`, `openai/gpt-oss-120b:free`, `openai/gpt-oss-20b:free`, and `google/gemma-4-31b-it:free`.
+
+### AI Approach Sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as API Client
+    participant API as Express /analyze-ticket
+    participant Rules as Local Rules Engine
+    participant Signals as Signal Extractor
+    participant Guardrails as Safety Guardrails
+    participant OptionalAI as Optional OpenRouter Helper
+    participant OpenRouter as OpenRouter Models
+
+    Client->>API: Submit complaint and transaction history
+    API->>Rules: analyzeTicket(input)
+    Rules->>Signals: extractSignals(complaint)
+    Signals-->>Rules: Amounts, TXN IDs, counterparties, intent, safety flags
+    Rules->>Rules: Classify case type
+    Rules->>Rules: Score transaction history
+    Rules->>Rules: Determine evidence verdict, severity, department
+    Rules->>Rules: Build summaries, actions, confidence, reason codes
+    Rules->>Guardrails: Validate response safety
+    Guardrails-->>Rules: Safe structured response
+    Rules-->>API: AnalyzeTicketResponse
+    API-->>Client: 200 JSON analysis
+
+    opt Optional developer-only AI utility
+        Client->>OptionalAI: getAiResponse(context, responseStyle, aiModel?)
+        OptionalAI->>OptionalAI: Build JSON-only system prompt
+        alt Explicit model provided
+            OptionalAI->>OpenRouter: Call selected model, for example google/gemma-4-31b-it:free
+        else No model provided
+            OptionalAI->>OpenRouter: Try configured free models in order with retries
+        end
+        OpenRouter-->>OptionalAI: JSON text or error
+        OptionalAI->>OptionalAI: Parse JSON, retry, or return raw/error result
+        OptionalAI-->>Client: AiResponse
+    end
+```
+
 ## Model and Cost Reasoning
 
 | Item | Decision |
@@ -55,7 +107,8 @@ An optional OpenRouter helper exists in `src/utils/aiResponse.ts`, but it is not
 | Latency profile | Local CPU-bound processing, suitable for fast hidden-test execution. |
 | Reliability | Deterministic outputs avoid model drift, rate limits, provider downtime, and non-JSON responses. |
 | Safety | No customer complaint data is sent to an external LLM provider in the core flow. |
-| Optional AI cost | OpenRouter usage applies only if developers call the optional utility separately. |
+| Optional LLM model | `google/gemma-4-31b-it:free` is used in the manual AI utility test; `getAiResponse` can also cycle through configured free OpenRouter models. |
+| Optional AI cost | OpenRouter usage applies only if developers call the optional utility separately; free-model availability and limits depend on OpenRouter. |
 
 ## High-Level Architecture
 
@@ -319,9 +372,17 @@ Analyzes one complaint against the transaction history supplied in the request b
 
 - Node.js 20+
 - npm
+- Git
 - PostgreSQL if you want auth and persistence
 
-### Install
+### Clone Repository
+
+```bash
+git clone https://github.com/asapial/sustPreliBackend.git
+cd sustPreliBackend
+```
+
+### Install Dependencies
 
 ```bash
 npm install

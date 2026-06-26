@@ -627,16 +627,27 @@ function generateRecommendedNextAction(
   }
 }
 
-// ── 9. Customer Reply (Language-Aware, Humanized) ─────────────────────────────
-// Generates a warm, empathetic customer-facing reply.
-// Language: "en" = English, "bn" = native Bangla, "mixed" = Banglish
+// ── 9. Customer Reply (Language-Aware, Dynamic, Humanized) ───────────────────
+// Generates a warm, empathetic, CONTEXT-SPECIFIC customer-facing reply.
+// Every field (amount, txnId, counterparty, date, anomaly pattern) is woven
+// directly into the sentence — no two tickets produce the same reply.
 
 interface CustomerReplyContext {
   txnId?: string | null;
   amount?: number;
   counterparty?: string | null;
   isBuyersRemorse?: boolean;
+  evidenceVerdict?: EvidenceVerdict;
   anomaly?: MultiTxnAnomaly;
+}
+
+// Formats a counterparty handle for human display
+function fmtCp(cp: string | null | undefined): string {
+  if (!cp) return "the recipient";
+  if (cp.startsWith("+88") || cp.startsWith("01")) return `the number ${cp}`;
+  if (cp.toUpperCase().startsWith("MERCHANT")) return `merchant ${cp}`;
+  if (cp.toUpperCase().startsWith("AGENT")) return `agent ${cp}`;
+  return cp;
 }
 
 function generateCustomerReply(
@@ -644,199 +655,374 @@ function generateCustomerReply(
   language: Language = "en",
   ctx: CustomerReplyContext = {}
 ): string {
-  const ref = ctx.txnId ? ` (Ref: ${ctx.txnId})` : "";
-  const amtStr = ctx.amount ? ` ${fmt(ctx.amount)}` : "";
+  const { txnId, amount, counterparty, isBuyersRemorse, evidenceVerdict, anomaly } = ctx;
 
-  // ── English replies ────────────────────────────────────────────────────────
+  // Shared building blocks
+  const txnRef   = txnId   ? ` (${txnId})`          : "";
+  const amtFmt   = amount  ? fmt(amount)             : null;
+  const cpFmt    = fmtCp(counterparty);
+  const amtSent  = amtFmt  ? `${amtFmt}`             : "the amount";
+  const isInconsistent = evidenceVerdict === "inconsistent";
+
+  // ─────────────────────────── ENGLISH ──────────────────────────────────────
   if (language === "en") {
     switch (caseType) {
-      case "wrong_transfer":
+
+      case "wrong_transfer": {
+        const opening = amtFmt
+          ? `We can see a transfer of ${amtFmt} was sent${counterparty ? ` to ${cpFmt}` : ""}${txnRef}.`
+          : `We've received your report${txnRef} about the transfer.`;
+        const status = isInconsistent
+          ? `Our records currently show the transfer did not go through, but we're checking further to be sure.`
+          : `Our records show the transfer was processed — our Dispute Resolution team will now investigate to confirm where the funds landed.`;
         return (
-          `Hi there! We're really sorry to hear about this — we completely understand how stressful it must be to have a transfer go to the wrong place. ` +
-          `We've logged your concern${ref} and our Dispute Resolution team will look into it right away. ` +
-          `We'll do everything we can to help resolve this as quickly as possible. ` +
-          `In the meantime, please remember that our team will never ask for your PIN, OTP, or password — please don't share these with anyone.`
+          `Hi there! We're really sorry to hear about this — we completely understand how stressful this must be. ` +
+          `${opening} ${status} ` +
+          `We'll keep you posted every step of the way and do everything possible to help. ` +
+          `Please remember — our team will never ask for your PIN, OTP, or password. Don't share these with anyone.`
         );
-      case "payment_failed":
+      }
+
+      case "payment_failed": {
+        const opening = amtFmt
+          ? `We can see a payment of ${amtFmt}${counterparty ? ` to ${cpFmt}` : ""}${txnRef} in your account.`
+          : `We've received your report${txnRef} about the payment.`;
+        const status = isInconsistent
+          ? `Interestingly, our records indicate the payment may have gone through on our end — but we'll investigate further to make sure the full picture is clear.`
+          : `The transaction appears to have encountered an issue on our end, and our Payments team is already on it.`;
         return (
-          `We're sorry to hear your payment didn't go through as expected! We know how frustrating that can be. ` +
-          `We've received your report${ref} and our Payments team is already reviewing the transaction details. ` +
-          `If any amount was deducted from your account, rest assured it will be handled as per our policy. ` +
-          `We'll get back to you with an update shortly. Please don't share your PIN or OTP with anyone.`
+          `We're really sorry to hear your payment didn't go through as expected. ${opening} ` +
+          `${status} ` +
+          `If any amount was deducted and the service wasn't delivered, rest assured it will be handled according to our policy. ` +
+          `We'll get back to you very soon. Please don't share your PIN or OTP with anyone.`
         );
-      case "refund_request":
-        if (ctx.isBuyersRemorse) {
+      }
+
+      case "refund_request": {
+        if (isBuyersRemorse) {
+          const merchantLine = counterparty
+            ? `to ${cpFmt}`
+            : `to the merchant`;
           return (
-            `Thank you for reaching out to us. We understand that sometimes plans change, and we appreciate your honesty. ` +
-            `However, we'd like to let you know that once a payment is successfully completed to a merchant${amtStr}, ` +
-            `our platform is unfortunately unable to process a reversal on the basis of a change of mind, as the funds have already been transferred to the merchant. ` +
-            `We'd recommend reaching out directly to the merchant to discuss a possible refund or exchange at their discretion. ` +
-            `If you believe there was an error with the transaction itself, please let us know and we'll be happy to investigate further.`
+            `Thank you for reaching out! We appreciate your honesty — we understand that sometimes plans change. ` +
+            `However, we'd like to let you know that your payment of ${amtSent} ${merchantLine}${txnRef} was successfully completed, ` +
+            `which means the funds have already been transferred to them. ` +
+            `Unfortunately, our platform policy does not allow reversals based on a change of mind, since the merchant has already received the payment. ` +
+            `We'd recommend reaching out directly to the merchant — they may be able to offer a refund or exchange. ` +
+            `If you believe there was a technical error with the transaction itself, please let us know and we'll gladly look into it.`
           );
         }
+        const opening = amtFmt
+          ? `We've received your refund request for ${amtFmt}${counterparty ? ` paid to ${cpFmt}` : ""}${txnRef}.`
+          : `We've received your refund request${txnRef}.`;
         return (
-          `We've received your refund request${ref} and we truly understand how important this is to you. ` +
-          `Our team is reviewing the transaction details and will verify eligibility as quickly as possible. ` +
-          `Please note that refund decisions are subject to our official policy and may require a short verification period. ` +
-          `We appreciate your patience and will keep you updated. Please do not share your PIN or OTP with anyone.`
+          `${opening} We truly understand how important this is for you, and we're treating it with priority. ` +
+          `Our team is reviewing the transaction details right now and will verify eligibility as quickly as possible. ` +
+          `Refund decisions are subject to our official policy and may require a brief verification window. ` +
+          `We appreciate your patience — we'll keep you updated. Please do not share your PIN or OTP with anyone.`
         );
-      case "duplicate_payment":
+      }
+
+      case "duplicate_payment": {
+        const opening = amtFmt
+          ? `We can see a payment of ${amtFmt}${counterparty ? ` to ${cpFmt}` : ""}${txnRef} in your records.`
+          : `We've received your report${txnRef} about the possible duplicate.`;
         return (
-          `We completely understand how worrying it is to see what looks like a double charge — and we want to sort this out for you right away. ` +
-          `We've flagged your concern${ref} and our Payments team will review all relevant transaction records to confirm whether a duplicate charge occurred. ` +
-          `If a duplicate deduction is confirmed, it will be addressed through our official process. We'll update you as soon as we have more information.`
+          `We completely understand how worrying a double charge can be — and we want to sort this out for you right away! ` +
+          `${opening} ` +
+          `Our Payments team will now carefully review all relevant records to confirm whether a duplicate deduction actually occurred. ` +
+          `If a double charge is confirmed, it will be corrected through our official process. We'll update you as soon as we have a finding.`
         );
-      case "merchant_settlement_delay":
+      }
+
+      case "merchant_settlement_delay": {
+        const opening = amtFmt
+          ? `We've noted your concern about the delayed settlement of ${amtFmt}${txnRef}.`
+          : `We've noted your settlement concern${txnRef}.`;
         return (
-          `We're sorry to hear about the delay in your merchant settlement. We know how important timely settlements are to your business. ` +
-          `We've noted your concern${ref} and our Merchant Operations team will review your settlement status immediately. ` +
-          `We'll follow up with you through official channels as soon as we have an update.`
+          `We're sorry for the inconvenience — we know how critical timely settlements are for your business. ` +
+          `${opening} ` +
+          `Our Merchant Operations team will review the settlement batch status immediately and follow up through official channels. ` +
+          `We appreciate your patience and will get back to you as soon as possible.`
         );
-      case "agent_cash_in_issue":
+      }
+
+      case "agent_cash_in_issue": {
+        const opening = amtFmt
+          ? `We can see a cash-in of ${amtFmt}${counterparty ? ` via ${cpFmt}` : ""}${txnRef} in your history.`
+          : `We've received your cash-in report${txnRef}.`;
         return (
-          `We're sorry to hear your cash-in hasn't reflected in your account yet — that must be really inconvenient. ` +
-          `We've received your report${ref} and our Agent Operations team will verify the transaction record right away. ` +
-          `If there's any discrepancy, we'll follow the proper procedure to get it resolved. We'll be in touch shortly.`
+          `We're sorry your balance hasn't updated yet — that's definitely frustrating and we understand your concern. ` +
+          `${opening} ` +
+          `Our Agent Operations team will verify the transaction against our ledger right away. ` +
+          `If there's any discrepancy, we'll follow the proper procedure to get it credited to your account. We'll be in touch shortly.`
         );
+      }
+
       case "phishing_or_social_engineering":
         return (
-          `Thank you for alerting us — you did the right thing by reporting this immediately. ` +
-          `Please do NOT share your PIN, OTP, password, or any verification code with anyone, even if they claim to be from our support team. ` +
-          `Our team will NEVER ask for these details. We've flagged this incident for our Fraud & Risk team to review. ` +
-          `If you believe your account may have been compromised, please change your PIN immediately through the app.`
+          `Thank you for reporting this immediately — you absolutely did the right thing. ` +
+          `We want to be very clear: our team will NEVER ask for your PIN, OTP, password, or any verification code — not through calls, messages, or any channel. ` +
+          `Please do NOT share these details with anyone, even if they claim to be from our support team. ` +
+          `We've flagged this incident for our Fraud & Risk team to investigate urgently. ` +
+          `If you think your account may have been accessed without your permission, please change your PIN right now through the app.`
         );
-      default:
-        if (ctx.anomaly && ctx.anomaly.type !== "none") {
+
+      default: {
+        // "other" case with anomaly — describe the pattern specifically
+        if (anomaly && anomaly.type === "multiple_same_amount_different_recipients") {
+          const txnCount = anomaly.transactions.length;
+          const amountMentioned = anomaly.transactions[0]?.amount;
+          const uniqueCps = [...new Set(anomaly.transactions.map(t => t.counterparty).filter(Boolean))];
           return (
-            `Thank you for reaching out to us. We can see there are a few transactions on your account that we'd like to look into more carefully on your behalf. ` +
-            `We've logged your concern and our support team will review your recent transaction history to understand exactly what happened. ` +
-            `We'll get back to you with a clear explanation and any next steps. Please do not share your PIN or OTP with anyone.`
+            `Thank you for getting in touch — we understand something doesn't feel right about your account activity, and we take that very seriously. ` +
+            `Looking at your recent history, we can see ${txnCount} transfer${txnCount > 1 ? "s" : ""} of ${amountMentioned ? fmt(amountMentioned) : "the same amount"} ` +
+            `going to ${uniqueCps.length > 1 ? `${uniqueCps.length} different recipients (${uniqueCps.join(", ")})` : "the same recipient"}, which looks unusual. ` +
+            `Our support team will review this carefully and get back to you with a clear explanation of what happened and what the next steps are. ` +
+            `Please do not share your PIN or OTP with anyone while we investigate.`
           );
         }
+        if (anomaly && anomaly.type === "failed_after_completed") {
+          const completedTxn = anomaly.transactions[0];
+          const failedTxn = anomaly.transactions[1];
+          return (
+            `Thank you for reaching out — we can see why this is confusing. ` +
+            `Looking at your transaction history, it appears a transfer${completedTxn?.amount ? ` of ${fmt(completedTxn.amount)}` : ""} ` +
+            `to ${fmtCp(completedTxn?.counterparty)} was successfully completed${completedTxn?.transaction_id ? ` (${completedTxn.transaction_id})` : ""}, ` +
+            `but a follow-up attempt${failedTxn?.transaction_id ? ` (${failedTxn.transaction_id})` : ""} did not go through. ` +
+            `This may be why the recipient appears not to have received the money — the original transfer likely did go through. ` +
+            `Our team will investigate and confirm the exact status. Please do not share your PIN or OTP with anyone.`
+          );
+        }
+        // Fully vague — ask for more info gracefully
         return (
-          `Thank you for reaching out to us! We understand you have a concern about your account and we want to make sure we get to the bottom of it. ` +
-          `Could you please share a bit more detail — such as the approximate date, amount, or transaction type you're referring to? ` +
-          `This will help our team look into it much faster. In the meantime, please do not share your PIN or OTP with anyone.`
+          `Thank you for reaching out to us! We understand you have a concern about your account and we genuinely want to help. ` +
+          `To make sure we look into the right transaction, could you share a bit more detail — ` +
+          `such as the approximate date, the amount involved, or who you sent it to? ` +
+          `This will help our team investigate much faster. In the meantime, please do not share your PIN or OTP with anyone.`
         );
+      }
     }
   }
 
-  // ── Bangla replies (native Bangla script) ─────────────────────────────────
+  // ─────────────────────────── BANGLA ───────────────────────────────────────
   if (language === "bn") {
     switch (caseType) {
-      case "wrong_transfer":
+
+      case "wrong_transfer": {
+        const opening = amtFmt
+          ? `আমরা দেখতে পাচ্ছি ${amtFmt} এর একটি ট্রান্সফার${counterparty ? ` ${cpFmt}-এ` : ""} সম্পন্ন হয়েছে${txnRef}।`
+          : `আপনার অভিযোগ${txnRef} আমাদের কাছে পৌঁছেছে।`;
         return (
-          `আপনার অভিযোগ আমাদের কাছে পৌঁছে গেছে। ভুল নম্বরে টাকা চলে যাওয়া সত্যিই অনেক চিন্তার বিষয় — আমরা বুঝতে পারছি আপনি এখন কতটা উদ্বিগ্ন।` +
-          `${ref ? ` আপনার লেনদেন${ref}` : " আপনার বিষয়টি"} আমাদের ডিসপিউট রেজোলিউশন দলে পাঠানো হয়েছে, যারা এটি অগ্রাধিকারের ভিত্তিতে দেখবেন। ` +
-          `আমরা দ্রুত সমাধানের জন্য সব ধরনের সহায়তা করব। ` +
-          `মনে রাখবেন, আমাদের কোনো প্রতিনিধিই আপনার পিন, ওটিপি বা পাসওয়ার্ড জানতে চাইবেন না — এই তথ্য কারো সাথে শেয়ার করবেন না।`
+          `আপনার অভিযোগ পেয়ে আমরা সত্যিই দুঃখিত — এই পরিস্থিতি কতটা উদ্বেগজনক তা আমরা বুঝতে পারছি। ` +
+          `${opening} আমাদের ডিসপিউট রেজোলিউশন দল এটি অগ্রাধিকারের ভিত্তিতে তদন্ত করবে। ` +
+          `প্রতিটি পদক্ষেপে আপনাকে আপডেট জানানো হবে। ` +
+          `মনে রাখবেন, আমাদের কোনো প্রতিনিধি আপনার পিন, ওটিপি বা পাসওয়ার্ড চাইবেন না।`
         );
-      case "payment_failed":
+      }
+
+      case "payment_failed": {
+        const opening = amtFmt
+          ? `আমরা দেখতে পাচ্ছি ${amtFmt} এর একটি পেমেন্ট${txnRef} প্রক্রিয়াকরণের সময় সমস্যা হয়েছে।`
+          : `আপনার পেমেন্ট অভিযোগ${txnRef} আমরা পেয়েছি।`;
         return (
-          `আপনার পেমেন্টটি সফল না হওয়ায় আমরা দুঃখিত। এটি সত্যিই বিরক্তিকর অভিজ্ঞতা, এবং আমরা বুঝতে পারছি আপনি কতটা হতাশ হয়েছেন। ` +
-          `আপনার অভিযোগ${ref} আমাদের পেমেন্টস দল পর্যালোচনা করছেন। ` +
-          `যদি আপনার অ্যাকাউন্ট থেকে কোনো পরিমাণ কেটে নেওয়া হয়ে থাকে, নিশ্চিত থাকুন — আমাদের নীতিমালা অনুযায়ী তা সঠিকভাবে সমাধান করা হবে। শীঘ্রই আপনাকে আপডেট জানানো হবে।`
+          `আপনার পেমেন্ট সফল না হওয়ায় আমরা আন্তরিকভাবে দুঃখিত। ${opening} ` +
+          `আমাদের পেমেন্টস দল এটি এখনই পর্যালোচনা করছেন। যদি আপনার অ্যাকাউন্ট থেকে টাকা কাটা হয়ে থাকে, আমাদের নীতিমালা অনুযায়ী তা সমাধান করা হবে। ` +
+          `শীঘ্রই আপনাকে আপডেট জানানো হবে। পিন বা ওটিপি কারো সাথে শেয়ার করবেন না।`
         );
-      case "refund_request":
-        if (ctx.isBuyersRemorse) {
+      }
+
+      case "refund_request": {
+        if (isBuyersRemorse) {
           return (
-            `আপনার সাথে যোগাযোগ করার জন্য ধন্যবাদ। আমরা বুঝতে পারছি যে কখনো কখনো মন পরিবর্তন হতে পারে। ` +
-            `তবে আমরা জানাতে চাই যে, মার্চেন্টকে${amtStr} সফলভাবে পেমেন্ট সম্পন্ন হয়ে গেলে, শুধুমাত্র মন পরিবর্তনের কারণে আমাদের প্ল্যাটফর্মের পক্ষে সেই লেনদেন বাতিল করা সম্ভব নয়, কারণ টাকাটি মার্চেন্টের কাছে চলে গেছে। ` +
-            `আপনি সরাসরি মার্চেন্টের সাথে যোগাযোগ করে রিফান্ড বা বিনিময়ের বিষয়ে আলোচনা করতে পারেন। ` +
-            `যদি লেনদেনে কোনো প্রযুক্তিগত সমস্যা হয়ে থাকে, আমাদের জানান — আমরা সেক্ষেত্রে সাহায্য করতে প্রস্তুত।`
+            `আপনার সাথে যোগাযোগ করার জন্য ধন্যবাদ। আমরা বুঝতে পারছি কখনো কখনো মন পরিবর্তন হয়। ` +
+            `তবে জানাতে চাই, ${amtFmt ? `${amtFmt} এর` : "এই"} পেমেন্টটি${counterparty ? ` ${cpFmt}-কে` : " মার্চেন্টকে"} সফলভাবে পাঠানো হয়ে গেছে${txnRef}। ` +
+            `শুধুমাত্র মন পরিবর্তনের কারণে আমাদের প্ল্যাটফর্মের পক্ষে এই লেনদেন বাতিল করা সম্ভব নয়। ` +
+            `মার্চেন্টের সাথে সরাসরি যোগাযোগ করলে তারা সাহায্য করতে পারবেন। লেনদেনে কোনো প্রযুক্তিগত সমস্যা থাকলে আমাদের জানান।`
+          );
+        }
+        const opening = amtFmt
+          ? `${amtFmt} এর রিফান্ড অনুরোধ${txnRef} আমরা পেয়েছি।`
+          : `আপনার রিফান্ড অনুরোধ${txnRef} পেয়েছি।`;
+        return (
+          `${opening} এটি আপনার জন্য কতটা গুরুত্বপূর্ণ তা আমরা বুঝি এবং এটিকে অগ্রাধিকার দিচ্ছি। ` +
+          `আমাদের দল লেনদেনের বিবরণ যাচাই করে যত দ্রুত সম্ভব সিদ্ধান্ত নেবে। ` +
+          `আপনার ধৈর্যের জন্য ধন্যবাদ — আমরা প্রতিটি আপডেট জানাব। পিন বা ওটিপি কারো সাথে শেয়ার করবেন না।`
+        );
+      }
+
+      case "duplicate_payment": {
+        const opening = amtFmt
+          ? `আমরা দেখতে পাচ্ছি ${amtFmt} এর পেমেন্টটি${txnRef} নিয়ে আপনার উদ্বেগ রয়েছে।`
+          : `দুইবার চার্জ হওয়ার অভিযোগ${txnRef} আমরা পেয়েছি।`;
+        return (
+          `দুইবার চার্জ হওয়ার বিষয়টি সত্যিই উদ্বেগজনক — এটি বুঝতে পারছি। ${opening} ` +
+          `আমাদের পেমেন্টস দল সমস্ত প্রাসঙ্গিক রেকর্ড পর্যালোচনা করবেন। ডুপ্লিকেট চার্জ নিশ্চিত হলে প্রয়োজনীয় ব্যবস্থা নেওয়া হবে। ` +
+          `শীঘ্রই আপনাকে আপডেট জানাব।`
+        );
+      }
+
+      case "merchant_settlement_delay": {
+        const opening = amtFmt
+          ? `${amtFmt} এর সেটেলমেন্ট${txnRef} বিলম্বিত হওয়ার বিষয়টি আমরা নথিভুক্ত করেছি।`
+          : `মার্চেন্ট সেটেলমেন্ট সংক্রান্ত অভিযোগ${txnRef} পেয়েছি।`;
+        return (
+          `সেটেলমেন্টে দেরির জন্য আমরা দুঃখিত — ব্যবসার জন্য সময়মতো সেটেলমেন্ট কতটা জরুরি তা আমরা জানি। ` +
+          `${opening} আমাদের মার্চেন্ট অপারেশনস দল এটি এখনই পর্যালোচনা করবেন। দ্রুত আপডেট দেওয়া হবে।`
+        );
+      }
+
+      case "agent_cash_in_issue": {
+        const opening = amtFmt
+          ? `আমরা দেখতে পাচ্ছি ${amtFmt} এর ক্যাশ ইন${counterparty ? ` (${cpFmt})` : ""}${txnRef} ব্যালেন্সে যোগ হয়নি।`
+          : `ক্যাশ ইন সংক্রান্ত অভিযোগ${txnRef} পেয়েছি।`;
+        return (
+          `ব্যালেন্স আপডেট না হওয়াটা সত্যিই বিরক্তিকর — এজন্য আমরা আন্তরিকভাবে দুঃখিত। ` +
+          `${opening} আমাদের এজেন্ট অপারেশনস দল লেজারের বিপরীতে এটি যাচাই করবেন এবং দ্রুত সমাধান করবেন। শীঘ্রই যোগাযোগ করা হবে।`
+        );
+      }
+
+      case "phishing_or_social_engineering":
+        return (
+          `এটি রিপোর্ট করার জন্য আন্তরিক ধন্যবাদ — আপনি একদম সঠিক কাজ করেছেন। ` +
+          `আমরা স্পষ্টভাবে জানাতে চাই: আমাদের কোনো প্রতিনিধি কখনো পিন, ওটিপি, পাসওয়ার্ড বা যাচাইকরণ কোড চাইবেন না। ` +
+          `কোনো পরিস্থিতিতেই এই তথ্য কারো সাথে শেয়ার করবেন না। আমাদের ফ্রড ও রিস্ক দল এটি তদন্ত করছে। ` +
+          `অ্যাকাউন্ট ক্ষতিগ্রস্ত মনে হলে এখনই অ্যাপ থেকে পিন পরিবর্তন করুন।`
+        );
+
+      default: {
+        if (anomaly && anomaly.type === "multiple_same_amount_different_recipients") {
+          const txnCount = anomaly.transactions.length;
+          const amountMentioned = anomaly.transactions[0]?.amount;
+          return (
+            `আমাদের সাথে যোগাযোগ করার জন্য ধন্যবাদ। আপনার অ্যাকাউন্টে সম্প্রতি কিছু অস্বাভাবিক লেনদেন দেখা যাচ্ছে — ` +
+            `${amountMentioned ? `${fmt(amountMentioned)} টাকার ` : ""}${txnCount}টি ট্রান্সফার বিভিন্ন নম্বরে গেছে, যা আমাদের দৃষ্টিতে পড়েছে। ` +
+            `আমাদের সাপোর্ট দল বিষয়টি বিস্তারিতভাবে পর্যালোচনা করবেন এবং আপনাকে একটি স্পষ্ট ব্যাখ্যা ও পরবর্তী পদক্ষেপ জানাবেন। ` +
+            `তদন্তের সময় পিন বা ওটিপি কারো সাথে শেয়ার করবেন না।`
+          );
+        }
+        if (anomaly && anomaly.type === "failed_after_completed") {
+          const completedTxn = anomaly.transactions[0];
+          return (
+            `আমাদের সাথে যোগাযোগ করার জন্য ধন্যবাদ — এই পরিস্থিতি বিভ্রান্তিকর হওয়াটাই স্বাভাবিক। ` +
+            `আমরা দেখছি ${completedTxn?.amount ? `${fmt(completedTxn.amount)} টাকার` : "একটি"} ট্রান্সফার সফলভাবে সম্পন্ন হয়েছে${completedTxn?.transaction_id ? ` (${completedTxn.transaction_id})` : ""}, ` +
+            `কিন্তু পরবর্তী একটি প্রচেষ্টা ব্যর্থ হয়েছে। মূল ট্রান্সফারটি সম্ভবত সফল হয়েছে। ` +
+            `আমাদের দল বিস্তারিত যাচাই করবেন এবং সঠিক তথ্য জানাবেন। পিন বা ওটিপি কারো সাথে শেয়ার করবেন না।`
           );
         }
         return (
-          `আপনার রিফান্ড অনুরোধ${ref} আমরা পেয়েছি এবং বুঝতে পারছি এটি আপনার জন্য কতটা গুরুত্বপূর্ণ। ` +
-          `আমাদের দল লেনদেনের তথ্য যাচাই করে যত দ্রুত সম্ভব আপনাকে জানাবে। ` +
-          `রিফান্ড প্রক্রিয়াটি আমাদের অফিশিয়াল নীতিমালা অনুযায়ী সম্পন্ন হবে। আপনার ধৈর্যের জন্য ধন্যবাদ। পিন বা ওটিপি কারো সাথে শেয়ার করবেন না।`
-        );
-      case "duplicate_payment":
-        return (
-          `দুইবার চার্জ হওয়ার বিষয়টি সত্যিই উদ্বেগজনক — আমরা এটি বুঝতে পারছি। ` +
-          `আপনার অভিযোগ${ref} আমাদের পেমেন্টস দল পর্যালোচনা করবেন এবং ডুপ্লিকেট চার্জ নিশ্চিত হলে প্রয়োজনীয় ব্যবস্থা নেওয়া হবে। ` +
-          `আমরা শীঘ্রই আপনাকে আপডেট জানাব।`
-        );
-      case "merchant_settlement_delay":
-        return (
-          `মার্চেন্ট সেটেলমেন্টে দেরি হওয়ায় আমরা দুঃখিত। আমরা জানি ব্যবসার জন্য সময়মতো সেটেলমেন্ট কতটা জরুরি। ` +
-          `আপনার বিষয়টি${ref} আমাদের মার্চেন্ট অপারেশনস দলে পাঠানো হয়েছে। দ্রুত আপডেট দেওয়া হবে।`
-        );
-      case "agent_cash_in_issue":
-        return (
-          `ক্যাশ ইন ব্যালেন্সে না আসাটা সত্যিই অসুবিধাজনক — আমরা ক্ষমাপ্রার্থী। ` +
-          `আপনার অভিযোগ${ref} আমাদের এজেন্ট অপারেশনস দল তদন্ত করবেন এবং দ্রুত সমাধান করা হবে। শীঘ্রই আপনার সাথে যোগাযোগ করা হবে।`
-        );
-      case "phishing_or_social_engineering":
-        return (
-          `এটি রিপোর্ট করার জন্য আপনাকে ধন্যবাদ — আপনি একদম সঠিক কাজ করেছেন। ` +
-          `অনুগ্রহ করে কাউকে আপনার পিন, ওটিপি, পাসওয়ার্ড বা যেকোনো যাচাইকরণ কোড শেয়ার করবেন না, এমনকি যদি কেউ আমাদের প্রতিনিধি বলে দাবি করে। ` +
-          `আমাদের ফ্রড ও রিস্ক দল এই বিষয়টি তদন্ত করবে। যদি মনে হয় অ্যাকাউন্ট ক্ষতিগ্রস্ত হয়েছে, এখনই অ্যাপ থেকে পিন পরিবর্তন করুন।`
-        );
-      default:
-        return (
           `আমাদের সাথে যোগাযোগ করার জন্য ধন্যবাদ। আপনার অ্যাকাউন্ট সম্পর্কিত উদ্বেগটি আমরা গুরুত্বের সাথে নিচ্ছি। ` +
-          `আমাদের সাপোর্ট দল বিষয়টি পর্যালোচনা করবেন। দ্রুত সমাধানের জন্য অনুগ্রহ করে তারিখ, পরিমাণ বা লেনদেনের ধরন উল্লেখ করুন। পিন বা ওটিপি কারো সাথে শেয়ার করবেন না।`
+          `দ্রুত সমাধানের জন্য অনুগ্রহ করে তারিখ, পরিমাণ বা লেনদেনের ধরন জানান — আমাদের দল তখন আরো দ্রুত সাহায্য করতে পারবেন। পিন বা ওটিপি কারো সাথে শেয়ার করবেন না।`
         );
+      }
     }
   }
 
-  // ── Mixed / Banglish replies ───────────────────────────────────────────────
-  // (language === "mixed") — casual Banglish, warm & relatable
+  // ──────────────────────── MIXED / BANGLISH ────────────────────────────────
   switch (caseType) {
-    case "wrong_transfer":
+
+    case "wrong_transfer": {
+      const opening = amtFmt
+        ? `${amtFmt} টা${counterparty ? ` ${cpFmt}-এ` : ""} transfer হয়ে গেছে${txnRef} — এটা আমরা দেখতে পাচ্ছি।`
+        : `আপনার transfer এর complaint${txnRef} টা পেয়েছি।`;
       return (
-        `আপনার complaint টা আমরা পেয়েছি এবং বুঝতে পারছি এই ধরনের situation এ আপনি কতটা worried হয়ে পড়েছেন। ` +
-        `আপনার case${ref} আমাদের Dispute Resolution team এ পাঠানো হয়েছে, তারা এটা priority basis এ দেখবেন। ` +
-        `যত তাড়াতাড়ি সম্ভব আপনাকে update দেওয়া হবে। Please কখনো আপনার PIN বা OTP কারো সাথে share করবেন না।`
+        `আপনার complaint টা পেয়ে সত্যিই খারাপ লাগছে — এই situation এ আপনি কতটা stressed সেটা বুঝতে পারছি। ` +
+        `${opening} আমাদের Dispute Resolution team এখনই এটা investigate করবে। ` +
+        `প্রতিটা step এ আপনাকে update দেওয়া হবে। Please কখনো PIN বা OTP কারো সাথে share করবেন না।`
       );
-    case "payment_failed":
+    }
+
+    case "payment_failed": {
+      const opening = amtFmt
+        ? `আমরা দেখতে পাচ্ছি ${amtFmt} এর payment${txnRef} expected ভাবে complete হয়নি।`
+        : `আপনার payment complaint${txnRef} আমরা পেয়েছি।`;
       return (
-        `আপনার payment টা expected ভাবে complete হয়নি — এটা সত্যিই frustrating, আমরা বুঝতে পারছি। ` +
-        `আমাদের Payments team আপনার transaction${ref} review করছে। ` +
-        `Balance deduct হলে সেটা policy অনুযায়ী handle করা হবে। Shortly আপনাকে update দেওয়া হবে।`
+        `Payment না হওয়াটা সত্যিই frustrating — এটা আমরা বুঝি। ${opening} ` +
+        `আমাদের Payments team এটা এখনই review করছে। Balance deduct হলে সেটা policy অনুযায়ী handle করা হবে। ` +
+        `Shortly আপনাকে update দেওয়া হবে। PIN বা OTP share করবেন না।`
       );
-    case "refund_request":
-      if (ctx.isBuyersRemorse) {
+    }
+
+    case "refund_request": {
+      if (isBuyersRemorse) {
         return (
-          `আপনার সাথে যোগাযোগের জন্য ধন্যবাদ। আমরা বুঝতে পারছি situation টা। ` +
-          `কিন্তু একটু জানাই — merchant কে${amtStr} payment successfully complete হয়ে গেলে, ` +
-          `শুধু change of mind এর কারণে platform এর পক্ষ থেকে refund করা আমাদের policy তে নেই, কারণ টাকা merchant এর কাছে চলে গেছে। ` +
-          `সরাসরি merchant এর সাথে কথা বললে তারা হয়তো help করতে পারবেন। ` +
-          `যদি transaction এ কোনো technical error থেকে থাকে, আমাদের জানান।`
+          `আপনার সাথে যোগাযোগের জন্য ধন্যবাদ। situation টা আমরা বুঝতে পারছি। ` +
+          `কিন্তু একটু জানাই — ${amtFmt ? `${amtFmt} এর` : "এই"} payment${counterparty ? ` ${cpFmt}-কে` : " merchant কে"} successfully complete হয়ে গেছে${txnRef}। ` +
+          `শুধু change of mind এর কারণে platform থেকে refund করা আমাদের policy তে নেই, কারণ টাকা চলে গেছে। ` +
+          `Merchant এর সাথে directly কথা বললে তারা help করতে পারবে। Technical error থাকলে আমাদের জানান।`
+        );
+      }
+      const opening = amtFmt
+        ? `${amtFmt} এর refund request${txnRef} আমরা পেয়েছি।`
+        : `Refund request${txnRef} পেয়েছি।`;
+      return (
+        `${opening} জানি এটা আপনার জন্য কতটা important। ` +
+        `আমাদের team transaction details verify করবে এবং policy অনুযায়ী যত দ্রুত সম্ভব সমাধান করবে। ` +
+        `একটু patience রাখুন — আমরা আপনাকে update রাখব। PIN বা OTP share করবেন না।`
+      );
+    }
+
+    case "duplicate_payment": {
+      const opening = amtFmt
+        ? `${amtFmt} এর double charge${txnRef} এর বিষয়টা আমরা দেখছি।`
+        : `Double charge এর complaint${txnRef} পেয়েছি।`;
+      return (
+        `Double charge হওয়াটা definitely concerning। ${opening} ` +
+        `আমাদের Payments team সব transaction records review করবে এবং duplicate confirm হলে official process এ handle করা হবে। শীঘ্রই update আসবে।`
+      );
+    }
+
+    case "merchant_settlement_delay": {
+      const opening = amtFmt
+        ? `${amtFmt} এর settlement${txnRef} delay হচ্ছে — এটা আমরা দেখছি।`
+        : `Merchant settlement delay এর complaint${txnRef} পেয়েছি।`;
+      return (
+        `Merchant settlement এ দেরি হওয়াটা obviously business এর জন্য problem। ${opening} ` +
+        `আমাদের Merchant Operations team এটা দেখবে এবং দ্রুত update দেওয়া হবে।`
+      );
+    }
+
+    case "agent_cash_in_issue": {
+      const opening = amtFmt
+        ? `আমরা দেখতে পাচ্ছি ${amtFmt} এর cash in${counterparty ? ` (${cpFmt})` : ""}${txnRef} balance এ reflect হয়নি।`
+        : `Cash in complaint${txnRef} পেয়েছি।`;
+      return (
+        `Balance update না হওয়াটা definitely inconvenient — এজন্য sorry। ${opening} ` +
+        `আমাদের Agent Operations team এটা verify করবে এবং discrepancy থাকলে fix করা হবে। Shortly contact করা হবে।`
+      );
+    }
+
+    case "phishing_or_social_engineering":
+      return (
+        `Report করার জন্য ধন্যবাদ — এটা করা একদম সঠিক ছিল। ` +
+        `Clearly বলছি: আমাদের team কখনো PIN, OTP বা password চাইবে না — কেউ চাইলে সেটা definitely scam। Share করবেন না। ` +
+        `আমাদের Fraud team এটা urgently investigate করবে। Account compromise হয়ে থাকলে এখনই app থেকে PIN change করুন।`
+      );
+
+    default: {
+      if (anomaly && anomaly.type === "multiple_same_amount_different_recipients") {
+        const txnCount = anomaly.transactions.length;
+        const amountMentioned = anomaly.transactions[0]?.amount;
+        const uniqueCps = [...new Set(anomaly.transactions.map(t => t.counterparty).filter(Boolean))];
+        return (
+          `আমাদের সাথে contact করার জন্য ধন্যবাদ। আপনার account এ কিছু unusual activity দেখা যাচ্ছে — ` +
+          `${amountMentioned ? `${fmt(amountMentioned)} এর ` : ""}${txnCount}টা transfer ${uniqueCps.length > 1 ? `${uniqueCps.length}টা different number এ` : "same number এ"} গেছে${uniqueCps.length > 1 ? ` (${uniqueCps.join(", ")})` : ""}। ` +
+          `এটা clearly investigate করা দরকার। আমাদের team পুরো history টা carefully দেখবে এবং আপনাকে exactly কী হয়েছে সেটা জানাবে। ` +
+          `Please PIN বা OTP কারো সাথে share করবেন না।`
+        );
+      }
+      if (anomaly && anomaly.type === "failed_after_completed") {
+        const completedTxn = anomaly.transactions[0];
+        return (
+          `Confusing situation টার জন্য আমরা sorry। আমরা দেখতে পাচ্ছি ${completedTxn?.amount ? `${fmt(completedTxn.amount)} এর ` : ""}একটা transfer successfully complete হয়েছে${completedTxn?.transaction_id ? ` (${completedTxn.transaction_id})` : ""}, কিন্তু পরের attempt টা fail করেছে। ` +
+          `Original transfer টা likely গেছে — আমাদের team confirm করবে। Update দেওয়া হবে। PIN বা OTP share করবেন না।`
         );
       }
       return (
-        `আপনার refund request${ref} আমরা পেয়েছি। আমরা জানি এটা আপনার জন্য কতটা important। ` +
-        `আমাদের team টা transaction details verify করবে এবং policy অনুযায়ী যত দ্রুত সম্ভব সমাধান করবে। ` +
-        `একটু patience রাখুন — আমরা আপনাকে update রাখব। PIN বা OTP share করবেন না।`
+        `আমাদের সাথে contact করার জন্য ধন্যবাদ! Account এর কোনো concern আছে — সেটা আমরা seriously নিচ্ছি। ` +
+        `একটু বেশি detail দিলে — যেমন date, amount, বা কোন transaction — আমাদের team আরো দ্রুত help করতে পারবে। PIN বা OTP share করবেন না।`
       );
-    case "duplicate_payment":
-      return (
-        `Double charge হওয়াটা সত্যিই concerning — আপনার worry টা আমরা বুঝতে পারছি। ` +
-        `আমাদের Payments team আপনার transaction records${ref} দেখবে এবং duplicate confirm হলে সেটা official process এ handle করা হবে। শীঘ্রই update আসবে।`
-      );
-    case "merchant_settlement_delay":
-      return (
-        `Merchant settlement এ দেরি হচ্ছে — এটা obviously business এর জন্য problem। আমরা সেটা বুঝি। ` +
-        `আপনার case${ref} আমাদের Merchant Operations team দেখবে। দ্রুত update দেওয়া হবে।`
-      );
-    case "agent_cash_in_issue":
-      return (
-        `Cash in balance এ reflect না করাটা definitely inconvenient। এজন্য আমরা sorry। ` +
-        `আমাদের Agent Operations team আপনার transaction${ref} verify করবে এবং discrepancy থাকলে সেটা fix করা হবে। Shortly আপনার সাথে contact করা হবে।`
-      );
-    case "phishing_or_social_engineering":
-      return (
-        `এটা report করার জন্য ধন্যবাদ — এটা করা একদম সঠিক ছিল। ` +
-        `Please কাউকে আপনার PIN, OTP বা password share করবেন না, even যদি কেউ বলে সে আমাদের support team থেকে। আমরা কখনো এটা চাই না। ` +
-        `আমাদের Fraud team এটা investigate করবে। Account compromise হয়ে থাকলে এখনই app থেকে PIN change করুন।`
-      );
-    default:
-      return (
-        `আমাদের সাথে contact করার জন্য ধন্যবাদ! আপনার account related concern টা আমরা সিরিয়াসলি নিচ্ছি। ` +
-        `একটু বেশি detail দিলে — যেমন date, amount, বা কোন transaction এর কথা বলছেন — আমাদের team আরো দ্রুত help করতে পারবে। PIN বা OTP share করবেন না।`
-      );
+    }
   }
 }
 
