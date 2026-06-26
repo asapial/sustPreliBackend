@@ -37,11 +37,13 @@ export function extractSignals(rawComplaint: string): ExtractedSignals {
   const hasPinOtpPasswordSignal = pinOtpKeywords.some((kw) => normalized.includes(kw));
 
   // ── Scam / Phishing signals ──────────────────────────────────────────────
+  // Note: "link" alone is too broad (campaign link, etc). Require qualifier.
   const scamKeywords = [
-    "scam", "fraud", "fake", "suspicious call", "phishing", "link", "suspicious link",
-    "account blocked", "পুরস্কার", "প্রতারণা", "ভুয়া", "suspicious message", "fake message",
-    "hacked", "compromised", "unauthorized access", "verify your account",
-    "send otp", "give otp", "share pin", "give pin",
+    "scam", "fraud", "fake call", "suspicious call", "phishing", "suspicious link",
+    "click this link", "click the link", "account blocked", "পুরস্কার", "প্রতারণা", "ভুয়া",
+    "suspicious message", "fake message", "hacked", "compromised",
+    "unauthorized access", "verify your account",
+    "send otp", "give otp", "share pin", "give pin", "share otp",
   ];
   const hasScamSignal = scamKeywords.some((kw) => normalized.includes(kw));
 
@@ -56,40 +58,65 @@ export function extractSignals(rawComplaint: string): ExtractedSignals {
   const wrongTransferKeywords = [
     "wrong number", "wrong recipient", "wrong person", "sent to wrong", "wrong account",
     "ভুল নম্বর", "ভুল করে পাঠিয়েছি", "bhul number", "mistakenly sent", "wrong transfer",
-    "ভুল মানুষ", "অন্য নম্বরে", "different number",
+    "ভুল মানুষ", "অন্য নম্বরে", "different number", "ভুল নম্বরে",
   ];
   const hasWrongTransferSignal = wrongTransferKeywords.some((kw) => normalized.includes(kw));
 
   // ── Failed payment signals ───────────────────────────────────────────────
+  // NOTE: "merchant did not receive" removed — it also appears in legitimate
+  // merchant settlement complaints and causes mis-classification.
   const failedPaymentKeywords = [
     "failed", "payment failed", "transaction failed", "deducted but", "balance cut",
-    "টাকা কেটে গেছে", "পেমেন্ট হয়নি", "did not receive", "merchant did not receive",
+    "টাকা কেটে গেছে", "পেমেন্ট হয়নি",
     "payment not received", "not completed", "টাকা গেছে", "money deducted",
+    "balance deducted", "amount deducted",
+    // Pending payments: customer explicitly says pending → treat as failed-payment workflow
+    "payment is pending", "transaction is pending", "still pending", "shows pending",
   ];
   const hasFailedPaymentSignal = failedPaymentKeywords.some((kw) => normalized.includes(kw));
 
   // ── Duplicate payment signals ────────────────────────────────────────────
   const duplicateKeywords = [
     "charged twice", "paid twice", "double payment", "duplicate", "twice deducted",
-    "দুইবার", "দুবার", "double charged", "billed twice", "multiple times",
+    "দুইবার", "দুবার", "duibar", "dui bar",
+    "double charged", "billed twice", "multiple times",
+    "two times", "charged two", "pay twice", "paying twice",
   ];
   const hasDuplicateSignal = duplicateKeywords.some((kw) => normalized.includes(kw));
 
   // ── Merchant signals ─────────────────────────────────────────────────────
+  // NOTE: "merchant" alone excluded — appears in payment/refund complaints like
+  // "payment to merchant failed". Require "settlement" or Bangla merchant term.
   const merchantKeywords = [
-    "settlement", "merchant settlement", "merchant payment", "merchant portal",
-    "দোকানের টাকা", "মার্চেন্ট", "merchant", "shop payment", "business payment",
+    "settlement", "merchant settlement", "merchant portal",
+    "দোকানের টাকা", "মার্চেন্ট", "shop payment", "business payment",
     "settlement delayed", "settlement not received",
   ];
   const hasMerchantSignal = merchantKeywords.some((kw) => normalized.includes(kw));
 
-  // ── Agent cash-in signals ────────────────────────────────────────────────
+  // ── Agent cash-in signals ─────────────────────────────────────────────────
+  // NOTE: "agent" alone is intentionally excluded — it also appears in cash-out
+  // and other contexts. Require "cash in" or specific Bangla cash-in keywords.
   const agentCashInKeywords = [
-    "cash in", "cash-in", "cashin", "agent", "deposit", "balance not added",
+    "cash in", "cash-in", "cashin", "deposit", "balance not added",
     "ক্যাশ ইন", "এজেন্ট", "cash in failed", "deposit failed", "not credited",
     "balance not updated", "add balance",
   ];
   const hasAgentCashInSignal = agentCashInKeywords.some((kw) => normalized.includes(kw));
+
+  // ── Cash-out signals ─────────────────────────────────────────────────────
+  const cashOutKeywords = [
+    "cash out", "cash-out", "cashout", "ক্যাশ আউট", "cash withdrawal", "withdraw",
+  ];
+  const hasCashOutSignal = cashOutKeywords.some((kw) => normalized.includes(kw));
+
+  // ── Balance issue signals ─────────────────────────────────────────────────
+  // Indicates a financial/balance discrepancy even if unclassified
+  const balanceIssueKeywords = [
+    "balance", "ব্যালেন্স", "টাকা দেখাচ্ছে না", "balance wrong",
+    "wrong balance", "balance issue", "balance problem",
+  ];
+  const hasBalanceIssueSignal = balanceIssueKeywords.some((kw) => normalized.includes(kw));
 
   // ── Prompt injection signals ─────────────────────────────────────────────
   const promptInjectionKeywords = [
@@ -112,6 +139,8 @@ export function extractSignals(rawComplaint: string): ExtractedSignals {
     hasDuplicateSignal,
     hasMerchantSignal,
     hasAgentCashInSignal,
+    hasCashOutSignal,
+    hasBalanceIssueSignal,
     hasPromptInjectionSignal,
     normalizedText: normalized,
   };

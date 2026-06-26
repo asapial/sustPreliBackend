@@ -1,5 +1,23 @@
 // ============================================================
-// QueueStorm Investigator — Core Analysis Engine
+// QueueStorm Investigator — Core Analysis Engine (v3)
+//
+// Bug-fixes vs v2:
+// 1. classifyCaseType: prompt injection suppresses phishing classification
+//    so injected OTP/pin keywords don't hijack the real case type.
+// 2. determineEvidenceVerdict: duplicate_payment now requires isDuplicate=true
+//    to be "consistent"; plain keyword match without proof = "inconsistent".
+// 3. refund_request verdict: checks matched txn TYPE (refund completed = inconsistent).
+// 4. Phishing transaction matching threshold raised to 6 so unrelated
+//    transactions in history don't get attached to phishing complaints.
+// 5. determineSeverity: uses complaint-mentioned amounts (not txn amounts)
+//    for most rules; per-case thresholds; prompt injection only → critical
+//    when combined with credential/scam signal.
+// 6. wrong_transfer severity: insufficient_data → medium, otherwise → high.
+// 7. merchant_settlement_delay: failed status → high; pending → medium unless
+//    complaint explicitly states high amount.
+// 8. "other" case: matched txn → "consistent"; hasCashOutSignal used to score
+//    cash_out transactions; hasBalanceIssueSignal → medium severity + human review.
+// 9. Removed standalone "agent" from agentCashInKeywords (see normalize.ts).
 // ============================================================
 
 import { extractSignals } from "../../utils/normalize.js";
@@ -14,35 +32,59 @@ import {
   TransactionEntry,
 } from "./analyze-ticket.types.js";
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function fmt(amount: number | undefined): string {
+  if (amount === undefined) return "unknown amount";
+  return `${amount.toLocaleString()} BDT`;
+}
+
+function fmtType(type: string | undefined): string {
+  return type ? type.replace(/_/g, " ") : "transaction";
+}
+
 // ── 1. Case Classification ────────────────────────────────────────────────────
 
 function classifyCaseType(signals: ExtractedSignals): CaseType {
-  // Priority order: safety > specific financial > generic
-  if (signals.hasScamSignal || signals.hasPinOtpPasswordSignal) {
+  // Safety first — but SKIP phishing classification if prompt injection is
+  // detected, because the pin/otp keywords come from the injected text, not
+  // from a genuine phishing complaint. Real financial signals take precedence.
+  if (!signals.hasPromptInjectionSignal && (signals.hasScamSignal || signals.hasPinOtpPasswordSignal)) {
     return "phishing_or_social_engineering";
   }
-  if (signals.hasDuplicateSignal) {
-    return "duplicate_payment";
-  }
-  if (signals.hasMerchantSignal) {
-    return "merchant_settlement_delay";
-  }
-  if (signals.hasAgentCashInSignal) {
-    return "agent_cash_in_issue";
-  }
-  if (signals.hasWrongTransferSignal) {
-    return "wrong_transfer";
-  }
-  if (signals.hasFailedPaymentSignal) {
-    return "payment_failed";
-  }
-  if (signals.hasRefundSignal) {
-    return "refund_request";
-  }
+  if (signals.hasDuplicateSignal) return "duplicate_payment";
+  if (signals.hasMerchantSignal) return "merchant_settlement_delay";
+  if (signals.hasAgentCashInSignal) return "agent_cash_in_issue";
+  if (signals.hasWrongTransferSignal) return "wrong_transfer";
+  // Refund checked BEFORE payment_failed: "I want refund for my failed payment"
+  // has both signals but refund intent is more specific.
+  if (signals.hasRefundSignal) return "refund_request";
+  if (signals.hasFailedPaymentSignal) return "payment_failed";
   return "other";
 }
 
 // ── 2. Transaction Matching ───────────────────────────────────────────────────
+
+// Maps case types to their "natural" transaction types
+const TYPE_ALIGNMENT: Partial<Record<CaseType, TransactionEntry["type"][]>> = {
+  wrong_transfer: ["transfer"],
+  payment_failed: ["payment"],
+  duplicate_payment: ["payment"],
+  merchant_settlement_delay: ["settlement"],
+  agent_cash_in_issue: ["cash_in"],
+  refund_request: ["refund", "payment", "transfer"],
+  phishing_or_social_engineering: ["transfer", "payment", "cash_out"],
+};
+
+// Maps case types to their "natural" transaction statuses
+const STATUS_ALIGNMENT: Partial<Record<CaseType, TransactionEntry["status"][]>> = {
+  wrong_transfer: ["completed", "pending"],  // money sent (wrong transfer) OR still in-flight
+  payment_failed: ["failed", "pending"],
+  duplicate_payment: ["completed", "pending"],
+  merchant_settlement_delay: ["pending", "failed"],
+  agent_cash_in_issue: ["pending", "failed"],
+  refund_request: ["completed", "failed", "pending"],
+};
 
 function scoreTransaction(
   txn: TransactionEntry,
@@ -50,73 +92,67 @@ function scoreTransaction(
   caseType: CaseType
 ): number {
   let score = 0;
-  const normalizedCounterparty = txn.counterparty?.toLowerCase() ?? "";
   const txnId = txn.transaction_id?.toUpperCase() ?? "";
 
-  // Direct transaction ID mention
+  // ── Highest signal: TXN-ID directly mentioned in complaint ───────────────
   if (signals.mentionedTransactionIds.some((id) => id.toUpperCase() === txnId)) {
     score += 6;
   }
 
-  // Amount match
-  if (txn.amount !== undefined && signals.mentionedAmounts.some((amt) => Math.abs(amt - txn.amount!) < 1)) {
-    score += 3;
-  }
-
-  // Counterparty match
-  if (
-    signals.mentionedCounterparties.some((cp) => {
-      const cleanCp = cp.replace(/\s/g, "");
-      const cleanTxnCp = normalizedCounterparty.replace(/\s/g, "");
-      return cleanCp === cleanTxnCp || cleanTxnCp.includes(cleanCp) || cleanCp.includes(cleanTxnCp);
-    })
-  ) {
-    score += 3;
-  }
-
-  // Type alignment
-  const typeAlignment: Partial<Record<CaseType, TransactionEntry["type"][]>> = {
-    wrong_transfer: ["transfer"],
-    payment_failed: ["payment"],
-    duplicate_payment: ["payment"],
-    merchant_settlement_delay: ["settlement"],
-    agent_cash_in_issue: ["cash_in"],
-    refund_request: ["refund", "payment", "transfer"],
-  };
-
-  if (txn.type && typeAlignment[caseType]?.includes(txn.type)) {
-    score += 2;
-  } else if (txn.type) {
-    // Type contradicts case
-    const contradictions: Partial<Record<CaseType, TransactionEntry["type"][]>> = {
-      wrong_transfer: ["cash_in", "settlement"],
-      agent_cash_in_issue: ["settlement", "payment"],
-    };
-    if (contradictions[caseType]?.includes(txn.type)) {
-      score -= 2;
-    }
-  }
-
-  // Status alignment
-  if (caseType === "payment_failed" && (txn.status === "failed" || txn.status === "pending")) {
-    score += 2;
-  } else if (caseType === "wrong_transfer" && txn.status === "completed") {
-    score += 2;
-  } else if (caseType === "duplicate_payment" && (txn.status === "completed" || txn.status === "pending")) {
-    score += 2;
-  } else if (caseType === "agent_cash_in_issue" && (txn.status === "pending" || txn.status === "failed")) {
-    score += 2;
-  } else if (caseType === "merchant_settlement_delay" && (txn.status === "pending" || txn.status === "failed")) {
-    score += 2;
-  }
-
-  // Amount contradictions
+  // ── Amount match ──────────────────────────────────────────────────────────
   if (txn.amount !== undefined && signals.mentionedAmounts.length > 0) {
-    const minMentioned = Math.min(...signals.mentionedAmounts);
+    if (signals.mentionedAmounts.some((amt) => Math.abs(amt - txn.amount!) < 1)) {
+      score += 3; // exact match
+    } else if (signals.mentionedAmounts.some((amt) => Math.abs(amt - txn.amount!) / txn.amount! < 0.1)) {
+      score += 1; // ~10% tolerance
+    }
+    // Large contradiction penalty
     const maxMentioned = Math.max(...signals.mentionedAmounts);
-    if (txn.amount < minMentioned * 0.1 || txn.amount > maxMentioned * 10) {
+    if (txn.amount > maxMentioned * 5 || txn.amount < maxMentioned * 0.1) {
       score -= 2;
     }
+  }
+
+  // ── Counterparty / phone number match ────────────────────────────────────
+  if (signals.mentionedCounterparties.length > 0 && txn.counterparty) {
+    const normTxnCp = txn.counterparty.replace(/\s/g, "").toLowerCase();
+    if (
+      signals.mentionedCounterparties.some((cp) => {
+        const c = cp.replace(/\s/g, "").toLowerCase();
+        return c === normTxnCp || normTxnCp.includes(c) || c.includes(normTxnCp);
+      })
+    ) {
+      score += 3;
+    }
+  }
+
+  // ── Type alignment ────────────────────────────────────────────────────────
+  if (txn.type) {
+    if (TYPE_ALIGNMENT[caseType]?.includes(txn.type)) {
+      score += 2;
+      // Extra bonus for the most specific type in refund_request
+      if (caseType === "refund_request" && txn.type === "refund") score += 1;
+    } else {
+      // Strong contradiction: type clearly does not belong to this case
+      const contradictions: Partial<Record<CaseType, TransactionEntry["type"][]>> = {
+        wrong_transfer: ["settlement", "refund"],
+        payment_failed: ["cash_in", "settlement", "refund"],
+        agent_cash_in_issue: ["settlement", "payment", "cash_out"],
+        merchant_settlement_delay: ["cash_in", "cash_out", "refund"],
+      };
+      if (contradictions[caseType]?.includes(txn.type)) score -= 2;
+    }
+
+    // For "other" case: match by activity type using extracted signals
+    if (caseType === "other") {
+      if (signals.hasCashOutSignal && txn.type === "cash_out") score += 2;
+      if (signals.hasRefundSignal && txn.type === "refund") score += 2;
+    }
+  }
+
+  // ── Status alignment ──────────────────────────────────────────────────────
+  if (txn.status && STATUS_ALIGNMENT[caseType]?.includes(txn.status)) {
+    score += 2;
   }
 
   return score;
@@ -131,8 +167,8 @@ function findRelevantTransaction(
     return { txn: null, score: 0, isDuplicate: false };
   }
 
-  // Check for duplicate payment scenario
-  if (caseType === "duplicate_payment" && transactions.length >= 2) {
+  // ── Duplicate payment: look for same-amount same-counterparty pair ────────
+  if (caseType === "duplicate_payment") {
     for (let i = 0; i < transactions.length; i++) {
       for (let j = i + 1; j < transactions.length; j++) {
         const a = transactions[i];
@@ -147,21 +183,41 @@ function findRelevantTransaction(
         }
       }
     }
+    // No real duplicate pair found — fall through to best-score matching
+    // so we still pick the most relevant single transaction (verdict = inconsistent)
   }
 
   let bestTxn: TransactionEntry | null = null;
-  let bestScore = 0;
+  let bestScore = -Infinity;
 
   for (const txn of transactions) {
-    const score = scoreTransaction(txn, signals, caseType);
-    if (score > bestScore) {
-      bestScore = score;
+    const s = scoreTransaction(txn, signals, caseType);
+    if (s > bestScore) {
+      bestScore = s;
       bestTxn = txn;
     }
   }
 
-  const MATCH_THRESHOLD = 3;
-  return { txn: bestScore >= MATCH_THRESHOLD ? bestTxn : null, score: bestScore, isDuplicate: false };
+  // ── Adaptive threshold ────────────────────────────────────────────────────
+  // Phishing: only match if TXN-ID or amount+counterparty explicitly reference it (score≥6)
+  // because phishing complaints normally have no directly related transaction.
+  if (caseType === "phishing_or_social_engineering") {
+    return { txn: bestScore >= 6 ? bestTxn : null, score: Math.max(0, bestScore), isDuplicate: false };
+  }
+
+  // Vague complaint (no amounts, no TXN-IDs): lower threshold so type+status alone matches.
+  // merchant_settlement_delay: also match when complaint is specific but txn has wrong status
+  // (e.g. settlement completed but complaint says not received — we want to return it as inconsistent).
+  const isVague = signals.mentionedAmounts.length === 0 && signals.mentionedTransactionIds.length === 0;
+  // For merchant/agent/wrong_transfer: lower threshold to 1 so that type-only match works
+  // even when counterparty is not extractable (e.g. "MRC-4040" doesn't parse as phone).
+  const THRESHOLD = isVague ? 1 : 2;
+
+  return {
+    txn: bestScore >= THRESHOLD ? bestTxn : null,
+    score: Math.max(0, bestScore),
+    isDuplicate: false,
+  };
 }
 
 // ── 3. Evidence Verdict ───────────────────────────────────────────────────────
@@ -170,53 +226,86 @@ function determineEvidenceVerdict(
   txn: TransactionEntry | null,
   caseType: CaseType,
   signals: ExtractedSignals,
-  transactions: TransactionEntry[]
+  transactions: TransactionEntry[],
+  isDuplicate: boolean
 ): EvidenceVerdict {
-  if (!txn || transactions.length === 0) {
-    return "insufficient_data";
+  if (transactions.length === 0 || !txn) return "insufficient_data";
+
+  // ── INCONSISTENT checks ───────────────────────────────────────────────────
+
+  // payment_failed: complained payment actually went through
+  if (caseType === "payment_failed" && txn.status === "completed") return "inconsistent";
+
+  // wrong_transfer: claimed money was sent, but it never went through
+  if (caseType === "wrong_transfer" && (txn.status === "failed" || txn.status === "reversed")) return "inconsistent";
+
+  // agent_cash_in_issue: claimed cash-in not reflected, but it completed fine
+  if (caseType === "agent_cash_in_issue" && txn.status === "completed") return "inconsistent";
+
+  // merchant_settlement_delay: Complaint says merchant didn't receive but settlement is completed
+  if (caseType === "merchant_settlement_delay" && txn.status === "completed") return "inconsistent";
+
+  // duplicate_payment: complaint says double-charged, but no actual duplicate pair found
+  if (caseType === "duplicate_payment" && !isDuplicate) return "inconsistent";
+
+  // Complaint says refund not received but reversed already, OR matched a completed refund txn
+  if (caseType === "refund_request") {
+    if (txn.type === "refund" && txn.status === "completed") return "inconsistent";
+    if (txn.status === "reversed") return "inconsistent";
   }
 
-  // Consistent cases
-  if (caseType === "wrong_transfer" && txn.type === "transfer" && txn.status === "completed") {
-    return "consistent";
-  }
-  if (caseType === "payment_failed" && txn.type === "payment" && (txn.status === "failed" || txn.status === "pending")) {
-    return "consistent";
-  }
-  if (caseType === "duplicate_payment") {
-    return "consistent"; // already verified in findRelevantTransaction
-  }
-  if (caseType === "merchant_settlement_delay" && txn.type === "settlement" && (txn.status === "pending" || txn.status === "failed")) {
-    return "consistent";
-  }
-  if (caseType === "agent_cash_in_issue" && txn.type === "cash_in" && (txn.status === "pending" || txn.status === "failed")) {
-    return "consistent";
-  }
-  if (caseType === "refund_request" && txn.status !== "reversed") {
-    return "consistent";
-  }
-  if (caseType === "phishing_or_social_engineering") {
-    // No transaction match expected; signal-based
-    return "insufficient_data";
-  }
-
-  // Inconsistent cases
-  if (caseType === "payment_failed" && txn.status === "completed") {
-    return "inconsistent";
-  }
-  if (caseType === "wrong_transfer" && txn.status === "failed") {
-    return "inconsistent";
-  }
+  // Amount mentioned in complaint but wildly different from matched txn
   if (
     signals.mentionedAmounts.length > 0 &&
     txn.amount !== undefined &&
-    !signals.mentionedAmounts.some((amt) => Math.abs(amt - txn.amount!) < txn.amount! * 0.1)
+    !signals.mentionedAmounts.some((a) => Math.abs(a - txn.amount!) / Math.max(txn.amount!, 1) < 0.15)
   ) {
-    return "inconsistent";
+    const maxMentioned = Math.max(...signals.mentionedAmounts);
+    if (Math.abs(maxMentioned - txn.amount) / Math.max(txn.amount, 1) > 0.5) return "inconsistent";
   }
-  if (caseType === "refund_request" && txn.status === "reversed") {
-    return "inconsistent"; // refund already completed
+
+  // ── CONSISTENT checks ─────────────────────────────────────────────────────
+
+  // wrong_transfer: transfer that completed (or is still pending) supports the claim
+  if (caseType === "wrong_transfer") {
+    if (txn.status === "completed" || txn.status === "pending") return "consistent";
   }
+
+  // payment_failed: failed/pending payment supports the complaint
+  if (caseType === "payment_failed") {
+    if (txn.status === "failed" || txn.status === "pending") return "consistent";
+  }
+
+  // duplicate_payment: only consistent if a genuine duplicate pair was confirmed
+  if (caseType === "duplicate_payment" && isDuplicate) return "consistent";
+
+  // merchant_settlement_delay: pending/failed settlement supports the complaint
+  if (caseType === "merchant_settlement_delay") {
+    if (txn.status === "pending" || txn.status === "failed") return "consistent";
+    if (txn.type === "settlement") return "consistent"; // completed-late is still consistent
+  }
+
+  // agent_cash_in_issue: pending/failed cash-in supports the complaint
+  if (caseType === "agent_cash_in_issue") {
+    if (txn.status === "pending" || txn.status === "failed") return "consistent";
+    if (txn.type === "cash_in") return "consistent";
+  }
+
+  // refund_request: transaction exists, not yet reversed/completed-refund → consistent
+  if (caseType === "refund_request") {
+    return "consistent"; // we've already excluded the inconsistent cases above
+  }
+
+  // phishing: verdict is signal-based, not transaction-based
+  if (caseType === "phishing_or_social_engineering") {
+    return txn.status === "completed" || txn.status === "pending" ? "consistent" : "insufficient_data";
+  }
+
+  // other: any matched transaction is evidence
+  if (caseType === "other") return "consistent";
+
+  // Fallback: type alignment gives partial support
+  if (txn.type && TYPE_ALIGNMENT[caseType]?.includes(txn.type)) return "consistent";
 
   return "insufficient_data";
 }
@@ -229,51 +318,67 @@ function determineSeverity(
   signals: ExtractedSignals,
   txn: TransactionEntry | null
 ): Severity {
-  // Critical cases
-  if (caseType === "phishing_or_social_engineering") {
+  if (caseType === "phishing_or_social_engineering") return "critical";
+
+  // Prompt injection + credential/scam signal together = critical (active attack attempt)
+  if (
+    signals.hasPromptInjectionSignal &&
+    (signals.hasPinOtpPasswordSignal || signals.hasScamSignal)
+  ) {
     return "critical";
   }
-  if (signals.hasPromptInjectionSignal) {
-    return "critical";
+
+  // Use complaint-mentioned amounts for severity decisions (not txn amounts).
+  // This avoids inflating severity when the customer didn't mention a high amount.
+  // Exception: for merchant settlements, use txn amount since merchants rarely
+  // state it verbally in complaints.
+  const mentionedMax = signals.mentionedAmounts.length > 0 ? Math.max(...signals.mentionedAmounts) : 0;
+
+  // ── wrong_transfer ────────────────────────────────────────────────────────
+  if (caseType === "wrong_transfer") {
+    // No evidence means uncertain scope → medium; any evidence present → high
+    return evidenceVerdict === "insufficient_data" ? "medium" : "high";
   }
 
-  const amount = txn?.amount ?? (signals.mentionedAmounts.length > 0 ? Math.max(...signals.mentionedAmounts) : 0);
+  // ── Global high-value threshold (complaint explicitly mentions ≥10 000) ───
+  if (mentionedMax >= 10000) return "high";
 
-  // High cases
-  if (caseType === "wrong_transfer" && evidenceVerdict === "consistent") {
-    return "high";
-  }
-  if (amount >= 10000) {
-    return "high";
-  }
-  if (evidenceVerdict === "inconsistent") {
-    return "high";
-  }
-  if (signals.hasRefundSignal && amount >= 5000) {
-    return "high";
-  }
-
-  // Medium cases
+  // ── payment_failed ────────────────────────────────────────────────────────
   if (caseType === "payment_failed") {
-    return amount >= 5000 ? "high" : "medium";
+    return mentionedMax >= 5000 ? "high" : "medium";
   }
+
+  // ── duplicate_payment ─────────────────────────────────────────────────────
   if (caseType === "duplicate_payment") {
-    return "medium";
+    return mentionedMax >= 5000 ? "high" : "medium";
   }
+
+  // ── merchant_settlement_delay ─────────────────────────────────────────────
   if (caseType === "merchant_settlement_delay") {
-    return "medium";
-  }
-  if (caseType === "agent_cash_in_issue") {
-    return "medium";
-  }
-  if (caseType === "refund_request") {
-    return "medium";
-  }
-  if (evidenceVerdict === "insufficient_data" && caseType !== "other") {
+    // Failed settlement is more urgent; also escalate if large explicit amount
+    if (txn?.status === "failed") return "high";
+    if (mentionedMax >= 10000) return "high";
     return "medium";
   }
 
-  return "low";
+  // ── agent_cash_in_issue ───────────────────────────────────────────────────
+  if (caseType === "agent_cash_in_issue") {
+    if (mentionedMax >= 10000) return "high";
+    return "medium";
+  }
+
+  // ── refund_request ────────────────────────────────────────────────────────
+  if (caseType === "refund_request") {
+    return mentionedMax >= 5000 ? "high" : "medium";
+  }
+
+  // ── other ─────────────────────────────────────────────────────────────────
+  if (caseType === "other") {
+    if (signals.hasBalanceIssueSignal || signals.hasCashOutSignal) return "medium";
+    return "low";
+  }
+
+  return "medium";
 }
 
 // ── 5. Department Routing ─────────────────────────────────────────────────────
@@ -284,23 +389,16 @@ function determineDepartment(
   evidenceVerdict: EvidenceVerdict
 ): Department {
   switch (caseType) {
-    case "wrong_transfer":
-      return "dispute_resolution";
-    case "payment_failed":
-      return "payments_ops";
-    case "duplicate_payment":
-      return "payments_ops";
-    case "merchant_settlement_delay":
-      return "merchant_operations";
-    case "agent_cash_in_issue":
-      return "agent_operations";
-    case "phishing_or_social_engineering":
-      return "fraud_risk";
+    case "wrong_transfer": return "dispute_resolution";
+    case "payment_failed": return "payments_ops";
+    case "duplicate_payment": return "payments_ops";
+    case "merchant_settlement_delay": return "merchant_operations";
+    case "agent_cash_in_issue": return "agent_operations";
+    case "phishing_or_social_engineering": return "fraud_risk";
     case "refund_request":
-      if (severity === "high" || severity === "critical" || evidenceVerdict === "inconsistent") {
-        return "dispute_resolution";
-      }
-      return "customer_support";
+      return severity === "high" || severity === "critical" || evidenceVerdict === "inconsistent"
+        ? "dispute_resolution"
+        : "customer_support";
     default:
       return "customer_support";
   }
@@ -318,54 +416,98 @@ function determineHumanReview(
   if (caseType === "wrong_transfer") return true;
   if (caseType === "phishing_or_social_engineering") return true;
   if (caseType === "duplicate_payment") return true;
-  if (severity === "high" || severity === "critical") return true;
-  if (evidenceVerdict === "insufficient_data" && caseType !== "other") return true;
-  if (evidenceVerdict === "inconsistent") return true;
-  if (txn && txn.amount !== undefined && txn.amount >= 5000) return true;
-  if (signals.hasRefundSignal) return true;
   if (caseType === "merchant_settlement_delay") return true;
   if (caseType === "agent_cash_in_issue") return true;
+  if (severity === "high" || severity === "critical") return true;
+  if (evidenceVerdict === "inconsistent") return true;
+  if (evidenceVerdict === "insufficient_data" && caseType !== "other") return true;
+  if (txn?.amount !== undefined && txn.amount >= 5000) return true;
+  if (caseType === "payment_failed") return true;
+  if (caseType === "refund_request") return true;
+  // "other" with financial signals warrants human review
+  if (caseType === "other" && (signals.hasBalanceIssueSignal || signals.hasCashOutSignal)) return true;
   return false;
 }
 
-// ── 7. Agent Summary ─────────────────────────────────────────────────────────
+// ── 7. Agent Summary (DATA-RICH) ──────────────────────────────────────────────
 
 function generateAgentSummary(
   caseType: CaseType,
   evidenceVerdict: EvidenceVerdict,
   department: Department,
-  txn: TransactionEntry | null
+  txn: TransactionEntry | null,
+  signals: ExtractedSignals
 ): string {
   const caseLabel = caseType.replace(/_/g, " ");
+  const dept = department.replace(/_/g, " ");
+
   if (txn) {
-    return `Customer reports a ${caseLabel} issue related to transaction ${txn.transaction_id}. Provided transaction evidence appears ${evidenceVerdict}, and the case is routed to ${department.replace(/_/g, " ")}.`;
+    const txnAmount = fmt(txn.amount);
+    const txnType = fmtType(txn.type);
+    const txnStatus = txn.status ?? "unknown";
+    const txnCp = txn.counterparty ? ` to ${txn.counterparty}` : "";
+    const txnTs = txn.timestamp ? ` on ${new Date(txn.timestamp).toUTCString()}` : "";
+
+    let verdictNote: string;
+    if (evidenceVerdict === "consistent") {
+      verdictNote = "Transaction evidence is consistent with the complaint";
+    } else if (evidenceVerdict === "inconsistent") {
+      verdictNote = `Transaction evidence contradicts the complaint — ${txnType} of ${txnAmount} is marked ${txnStatus}, which conflicts with the reported issue`;
+    } else {
+      verdictNote = "Evidence is present but additional verification is needed";
+    }
+
+    return (
+      `Customer reports a ${caseLabel} issue. Matched transaction: ${txn.transaction_id} ` +
+      `(${txnType}, ${txnAmount}${txnCp}, status: ${txnStatus}${txnTs}). ` +
+      `${verdictNote}. Case routed to ${dept}.`
+    );
   }
-  return `Customer reports a ${caseLabel} issue, but no matching transaction was found in the provided history. Evidence is insufficient from the current data.`;
+
+  const amountHint =
+    signals.mentionedAmounts.length > 0
+      ? ` involving approximately ${fmt(Math.max(...signals.mentionedAmounts))}`
+      : "";
+  const cpHint =
+    signals.mentionedCounterparties.length > 0
+      ? ` with counterparty ${signals.mentionedCounterparties[0]}`
+      : "";
+
+  return (
+    `Customer reports a ${caseLabel} issue${amountHint}${cpHint}. ` +
+    `No transaction in the provided history could be matched to this complaint. ` +
+    `Manual investigation required — case routed to ${dept}.`
+  );
 }
 
 // ── 8. Recommended Next Action ────────────────────────────────────────────────
 
-function generateRecommendedNextAction(caseType: CaseType, evidenceVerdict: EvidenceVerdict): string {
-  if (evidenceVerdict === "insufficient_data" && caseType === "other") {
-    return "Request only non-sensitive clarifying details such as approximate time, amount, or transaction reference if available. Do not request PIN, OTP, password, or full card number.";
-  }
+function generateRecommendedNextAction(
+  caseType: CaseType,
+  evidenceVerdict: EvidenceVerdict,
+  txn: TransactionEntry | null
+): string {
+  const txnRef = txn ? ` (reference: ${txn.transaction_id})` : "";
+
   switch (caseType) {
     case "wrong_transfer":
-      return "Verify the matched transfer details using approved internal checks and escalate to dispute resolution. Do not promise reversal before authorization.";
+      return `Verify the matched transfer${txnRef} using approved internal tools. Confirm the intended recipient vs actual counterparty${txn?.counterparty ? ` (${txn.counterparty})` : ""}. Do not promise reversal before authorization from dispute_resolution.`;
     case "payment_failed":
-      return "Check transaction status, ledger debit status, and merchant confirmation. If eligible, follow the official failed-payment workflow.";
+      return `Check the ledger status for transaction${txnRef}. Confirm debit vs credit posting. If balance was deducted but merchant did not receive, follow the official failed-payment recovery workflow.`;
     case "refund_request":
-      return "Review transaction eligibility and policy status before taking any refund-related action. Do not confirm refund before authorization.";
+      return `Review transaction${txnRef} eligibility against refund policy. Verify current status${txn ? ` (currently: ${txn.status})` : ""}. Do not confirm refund before supervisor authorization.`;
     case "duplicate_payment":
-      return "Compare repeated payment records for amount, counterparty, and timestamp. Escalate to payments operations for adjustment review if duplicate debit is confirmed.";
+      return `Pull full payment records${txnRef ? " around " + txnRef : ""} and compare amount, counterparty, and timestamp for duplicate entries. Escalate to payments_ops if confirmed double debit.`;
     case "merchant_settlement_delay":
-      return "Check settlement batch status, merchant ID, and expected settlement window. Escalate to merchant operations if delayed.";
+      return `Check settlement batch status${txnRef}. Verify merchant ID and expected settlement window. Current status${txn ? `: ${txn.status}` : " unknown"}. Escalate to merchant_operations if overdue.`;
     case "agent_cash_in_issue":
-      return "Verify cash-in transaction status, agent ID, and ledger posting. Escalate to agent operations if the deposit was not reflected.";
+      return `Verify cash-in transaction${txnRef} against ledger posting. Confirm agent ID and balance credit. Status${txn ? `: ${txn.status}` : " unknown"}. Escalate to agent_operations if credit not reflected.`;
     case "phishing_or_social_engineering":
-      return "Escalate to fraud risk, record reported suspicious contact details if available, and advise the customer only through official safety guidance.";
+      return `Escalate immediately to fraud_risk. Log any suspicious phone number, link, or account mentioned. Advise customer through official channels only — do not share internal data.`;
     default:
-      return "Request only non-sensitive clarifying details such as approximate time, amount, or transaction reference if available. Do not request PIN, OTP, password, or full card number.";
+      return evidenceVerdict === "insufficient_data"
+        ? `Request non-sensitive clarifying details: approximate time, amount${txnRef ? "" : ", or transaction reference"}. Do not request PIN, OTP, password, or card details.`
+        : `Review available information${txnRef} and follow standard support workflow. Escalate if issue persists.`;
   }
 }
 
@@ -392,7 +534,7 @@ function generateCustomerReply(caseType: CaseType): string {
   }
 }
 
-// ── 10. Confidence Score ──────────────────────────────────────────────────────
+// ── 10. Confidence ────────────────────────────────────────────────────────────
 
 function calculateConfidence(
   txn: TransactionEntry | null,
@@ -401,43 +543,29 @@ function calculateConfidence(
   evidenceVerdict: EvidenceVerdict,
   caseType: CaseType
 ): number {
-  let confidence = 0.5;
+  let c = 0.5;
 
   if (txn) {
-    if (txnScore >= 6) confidence += 0.2;
-    else if (txnScore >= 3) confidence += 0.1;
+    if (txnScore >= 8) c += 0.30;
+    else if (txnScore >= 6) c += 0.20;
+    else if (txnScore >= 4) c += 0.15;
+    else if (txnScore >= 2) c += 0.05;
 
-    if (signals.mentionedAmounts.some((amt) => txn.amount !== undefined && Math.abs(amt - txn.amount!) < 1)) {
-      confidence += 0.1;
-    }
-    if (signals.mentionedCounterparties.length > 0) {
-      confidence += 0.1;
-    }
+    if (signals.mentionedAmounts.some((a) => txn.amount !== undefined && Math.abs(a - txn.amount!) < 1)) c += 0.10;
+    if (signals.mentionedCounterparties.length > 0 && txn.counterparty) c += 0.05;
   } else {
-    confidence -= 0.2;
+    c -= 0.15;
   }
 
-  // Keyword classification strength
-  if (caseType !== "other") {
-    confidence += 0.1;
-  } else {
-    confidence -= 0.1;
-  }
+  if (caseType !== "other") c += 0.05; else c -= 0.10;
 
-  // Evidence verdict
-  if (evidenceVerdict === "inconsistent") {
-    confidence -= 0.2;
-  } else if (evidenceVerdict === "insufficient_data") {
-    confidence -= 0.1;
-  }
+  if (evidenceVerdict === "consistent") c += 0.10;
+  else if (evidenceVerdict === "inconsistent") c -= 0.15;
+  else c -= 0.05;
 
-  // Vague complaint
-  if (signals.mentionedAmounts.length === 0 && signals.mentionedTransactionIds.length === 0) {
-    confidence -= 0.1;
-  }
+  if (signals.mentionedAmounts.length === 0 && signals.mentionedTransactionIds.length === 0) c -= 0.05;
 
-  // Clamp between 0.1 and 0.95
-  return Math.min(0.95, Math.max(0.1, Math.round(confidence * 100) / 100));
+  return Math.min(0.95, Math.max(0.10, Math.round(c * 100) / 100));
 }
 
 // ── 11. Reason Codes ──────────────────────────────────────────────────────────
@@ -451,182 +579,96 @@ function buildReasonCodes(
   isDuplicate: boolean,
   severity: Severity
 ): string[] {
-  const codes: string[] = [];
+  const codes: string[] = [caseType];
 
-  // Case type
-  codes.push(caseType);
-
-  // Transaction match
   if (txn) {
     codes.push("transaction_match");
-    if (signals.mentionedAmounts.some((amt) => txn.amount !== undefined && Math.abs(amt - txn.amount!) < 1)) {
-      codes.push("amount_match");
-    }
-    if (signals.mentionedCounterparties.length > 0) {
-      codes.push("counterparty_match");
-    }
-    if (txn.type) {
-      codes.push("type_match");
-    }
+    if (signals.mentionedAmounts.some((a) => txn.amount !== undefined && Math.abs(a - txn.amount!) < 1)) codes.push("amount_match");
+    if (signals.mentionedCounterparties.length > 0 && txn.counterparty) codes.push("counterparty_match");
+    if (txn.type && TYPE_ALIGNMENT[caseType]?.includes(txn.type)) codes.push("type_match");
     if (txn.status === "completed") codes.push("status_completed");
     if (txn.status === "failed") codes.push("status_failed");
     if (txn.status === "pending") codes.push("status_pending");
     if (txn.status === "reversed") codes.push("status_reversed");
   } else {
     codes.push("no_transaction_match");
+    codes.push("insufficient_history");
   }
 
-  if (evidenceVerdict === "insufficient_data") {
-    if (!txn) codes.push("insufficient_history");
-  }
-
-  if (signals.hasPromptInjectionSignal) {
-    codes.push("prompt_injection_detected");
-  }
-  if (signals.hasPinOtpPasswordSignal) {
-    codes.push("credential_request_detected");
-  }
-  if (signals.hasScamSignal) {
-    codes.push("phishing_signal");
-  }
-  if (isDuplicate) {
-    codes.push("duplicate_payment_detected");
-    codes.push("repeated_amount_counterparty");
-  }
-  if (humanReview) {
-    codes.push("human_review_required");
-  }
-  if (severity === "high" || severity === "critical") {
-    codes.push("high_value");
-  }
-  if (signals.mentionedAmounts.length === 0 && signals.mentionedTransactionIds.length === 0) {
-    codes.push("ambiguous_complaint");
-  }
+  if (evidenceVerdict === "inconsistent") codes.push("evidence_contradiction");
+  if (signals.hasPromptInjectionSignal) codes.push("prompt_injection_detected");
+  if (signals.hasPinOtpPasswordSignal) codes.push("credential_request_detected");
+  if (signals.hasScamSignal) codes.push("phishing_signal");
+  if (isDuplicate) { codes.push("duplicate_payment_detected"); codes.push("repeated_amount_counterparty"); }
+  if (humanReview) codes.push("human_review_required");
+  if (severity === "high" || severity === "critical") codes.push("high_value");
+  if (signals.mentionedAmounts.length === 0 && signals.mentionedTransactionIds.length === 0) codes.push("ambiguous_complaint");
 
   return [...new Set(codes)];
 }
 
 // ── 12. Final Safety Guardrails ───────────────────────────────────────────────
 
-const UNSAFE_REPLY_PATTERNS = [
-  "share your pin",
-  "send otp",
-  "give password",
-  "send full card",
-  "we will refund you",
-  "refund confirmed",
-  "reversal confirmed",
-  "account recovery confirmed",
-  "contact this number",
-  "click this link",
-  "your refund has been",
-  "refund has been processed",
+const UNSAFE_PATTERNS = [
+  "share your pin", "send otp", "give password", "send full card",
+  "we will refund you", "refund confirmed", "reversal confirmed",
+  "account recovery confirmed", "your refund has been processed",
 ];
 
 function applySafetyGuardrails(
   response: AnalyzeTicketResponse,
-  caseType: CaseType
+  caseType: CaseType,
+  evidenceVerdict: EvidenceVerdict,
+  txn: TransactionEntry | null
 ): AnalyzeTicketResponse {
-  let modified = false;
+  const isUnsafe = UNSAFE_PATTERNS.some(
+    (p) => response.customer_reply.toLowerCase().includes(p) || response.recommended_next_action.toLowerCase().includes(p)
+  );
 
-  const replyLower = response.customer_reply.toLowerCase();
-  const actionLower = response.recommended_next_action.toLowerCase();
-
-  for (const pattern of UNSAFE_REPLY_PATTERNS) {
-    if (replyLower.includes(pattern) || actionLower.includes(pattern)) {
-      modified = true;
-      break;
-    }
-  }
-
-  if (modified) {
+  if (isUnsafe) {
     response.customer_reply = generateCustomerReply(caseType);
-    response.recommended_next_action = generateRecommendedNextAction(caseType, response.evidence_verdict);
+    response.recommended_next_action = generateRecommendedNextAction(caseType, evidenceVerdict, txn);
     response.human_review_required = true;
-    if (!response.reason_codes.includes("safety_guardrail_applied")) {
-      response.reason_codes.push("safety_guardrail_applied");
-    }
+    if (!response.reason_codes.includes("safety_guardrail_applied")) response.reason_codes.push("safety_guardrail_applied");
   }
 
-  // Ensure required fields always have valid enum values
-  const validEvidenceVerdicts = ["consistent", "inconsistent", "insufficient_data"];
-  if (!validEvidenceVerdicts.includes(response.evidence_verdict)) {
-    response.evidence_verdict = "insufficient_data";
-  }
-
-  const validCaseTypes = [
-    "wrong_transfer", "payment_failed", "refund_request", "duplicate_payment",
-    "merchant_settlement_delay", "agent_cash_in_issue", "phishing_or_social_engineering", "other",
-  ];
-  if (!validCaseTypes.includes(response.case_type)) {
-    response.case_type = "other";
-  }
-
-  const validSeverities = ["low", "medium", "high", "critical"];
-  if (!validSeverities.includes(response.severity)) {
-    response.severity = "medium";
-  }
-
-  const validDepartments = [
-    "customer_support", "dispute_resolution", "payments_ops",
-    "merchant_operations", "agent_operations", "fraud_risk",
-  ];
-  if (!validDepartments.includes(response.department)) {
-    response.department = "customer_support";
-  }
-
-  // Confidence bounds
-  response.confidence = Math.min(0.95, Math.max(0.1, response.confidence));
+  // Enum validation
+  const V = {
+    evidence_verdict: ["consistent", "inconsistent", "insufficient_data"],
+    case_type: ["wrong_transfer", "payment_failed", "refund_request", "duplicate_payment", "merchant_settlement_delay", "agent_cash_in_issue", "phishing_or_social_engineering", "other"],
+    severity: ["low", "medium", "high", "critical"],
+    department: ["customer_support", "dispute_resolution", "payments_ops", "merchant_operations", "agent_operations", "fraud_risk"],
+  };
+  if (!V.evidence_verdict.includes(response.evidence_verdict)) response.evidence_verdict = "insufficient_data";
+  if (!V.case_type.includes(response.case_type)) response.case_type = "other";
+  if (!V.severity.includes(response.severity)) response.severity = "medium";
+  if (!V.department.includes(response.department)) response.department = "customer_support";
+  response.confidence = Math.min(0.95, Math.max(0.10, response.confidence));
 
   return response;
 }
 
-// ── Main Analysis Pipeline ────────────────────────────────────────────────────
+// ── Main Pipeline ─────────────────────────────────────────────────────────────
 
 export function analyzeTicket(input: AnalyzeTicketRequest): AnalyzeTicketResponse {
   const transactions = input.transaction_history ?? [];
 
-  // Step 1: Extract signals
   const signals = extractSignals(input.complaint);
-
-  // Step 2: Detect prompt injection (already in signals)
-
-  // Step 3: Classify case type
   const caseType = classifyCaseType(signals);
 
-  // Step 4: Find relevant transaction
   const { txn, score: txnScore, isDuplicate } = findRelevantTransaction(transactions, signals, caseType);
 
-  // Step 5: Evidence verdict
-  const evidenceVerdict = determineEvidenceVerdict(txn, caseType, signals, transactions);
-
-  // Step 6: Severity
+  const evidenceVerdict = determineEvidenceVerdict(txn, caseType, signals, transactions, isDuplicate);
   const severity = determineSeverity(caseType, evidenceVerdict, signals, txn);
-
-  // Step 7: Department
   const department = determineDepartment(caseType, severity, evidenceVerdict);
-
-  // Step 8: Human review
   const humanReviewRequired = determineHumanReview(caseType, severity, evidenceVerdict, txn, signals);
 
-  // Step 9: Agent summary
-  const agentSummary = generateAgentSummary(caseType, evidenceVerdict, department, txn);
-
-  // Step 10: Recommended next action
-  const recommendedNextAction = generateRecommendedNextAction(caseType, evidenceVerdict);
-
-  // Step 11: Customer reply
+  const agentSummary = generateAgentSummary(caseType, evidenceVerdict, department, txn, signals);
+  const recommendedNextAction = generateRecommendedNextAction(caseType, evidenceVerdict, txn);
   const customerReply = generateCustomerReply(caseType);
-
-  // Step 12: Confidence
   const confidence = calculateConfidence(txn, txnScore, signals, evidenceVerdict, caseType);
+  const reasonCodes = buildReasonCodes(caseType, txn, signals, evidenceVerdict, humanReviewRequired, isDuplicate, severity);
 
-  // Step 13: Reason codes
-  const reasonCodes = buildReasonCodes(
-    caseType, txn, signals, evidenceVerdict, humanReviewRequired, isDuplicate, severity
-  );
-
-  // Step 14: Build response
   let response: AnalyzeTicketResponse = {
     ticket_id: input.ticket_id,
     relevant_transaction_id: txn?.transaction_id ?? null,
@@ -642,8 +684,5 @@ export function analyzeTicket(input: AnalyzeTicketRequest): AnalyzeTicketRespons
     reason_codes: reasonCodes,
   };
 
-  // Step 15: Final safety check
-  response = applySafetyGuardrails(response, caseType);
-
-  return response;
+  return applySafetyGuardrails(response, caseType, evidenceVerdict, txn);
 }

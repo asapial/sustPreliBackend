@@ -78,6 +78,8 @@ export interface ExtractedSignals {
   hasDuplicateSignal: boolean;
   hasMerchantSignal: boolean;
   hasAgentCashInSignal: boolean;
+  hasCashOutSignal: boolean;
+  hasBalanceIssueSignal: boolean;
   hasPromptInjectionSignal: boolean;
   normalizedText: string;
 }
