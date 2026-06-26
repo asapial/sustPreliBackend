@@ -387,7 +387,9 @@ export const ModelName = {
   User: 'User',
   Session: 'Session',
   Account: 'Account',
-  Verification: 'Verification'
+  Verification: 'Verification',
+  TicketAnalysisLog: 'TicketAnalysisLog',
+  SafetyEventLog: 'SafetyEventLog'
 } as const
 
 export type ModelName = (typeof ModelName)[keyof typeof ModelName]
@@ -403,7 +405,7 @@ export type TypeMap<ExtArgs extends runtime.Types.Extensions.InternalArgs = runt
     omit: GlobalOmitOptions
   }
   meta: {
-    modelProps: "user" | "session" | "account" | "verification"
+    modelProps: "user" | "session" | "account" | "verification" | "ticketAnalysisLog" | "safetyEventLog"
     txIsolationLevel: TransactionIsolationLevel
   }
   model: {
@@ -703,6 +705,154 @@ export type TypeMap<ExtArgs extends runtime.Types.Extensions.InternalArgs = runt
         }
       }
     }
+    TicketAnalysisLog: {
+      payload: Prisma.$TicketAnalysisLogPayload<ExtArgs>
+      fields: Prisma.TicketAnalysisLogFieldRefs
+      operations: {
+        findUnique: {
+          args: Prisma.TicketAnalysisLogFindUniqueArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$TicketAnalysisLogPayload> | null
+        }
+        findUniqueOrThrow: {
+          args: Prisma.TicketAnalysisLogFindUniqueOrThrowArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$TicketAnalysisLogPayload>
+        }
+        findFirst: {
+          args: Prisma.TicketAnalysisLogFindFirstArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$TicketAnalysisLogPayload> | null
+        }
+        findFirstOrThrow: {
+          args: Prisma.TicketAnalysisLogFindFirstOrThrowArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$TicketAnalysisLogPayload>
+        }
+        findMany: {
+          args: Prisma.TicketAnalysisLogFindManyArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$TicketAnalysisLogPayload>[]
+        }
+        create: {
+          args: Prisma.TicketAnalysisLogCreateArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$TicketAnalysisLogPayload>
+        }
+        createMany: {
+          args: Prisma.TicketAnalysisLogCreateManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        createManyAndReturn: {
+          args: Prisma.TicketAnalysisLogCreateManyAndReturnArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$TicketAnalysisLogPayload>[]
+        }
+        delete: {
+          args: Prisma.TicketAnalysisLogDeleteArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$TicketAnalysisLogPayload>
+        }
+        update: {
+          args: Prisma.TicketAnalysisLogUpdateArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$TicketAnalysisLogPayload>
+        }
+        deleteMany: {
+          args: Prisma.TicketAnalysisLogDeleteManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        updateMany: {
+          args: Prisma.TicketAnalysisLogUpdateManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        updateManyAndReturn: {
+          args: Prisma.TicketAnalysisLogUpdateManyAndReturnArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$TicketAnalysisLogPayload>[]
+        }
+        upsert: {
+          args: Prisma.TicketAnalysisLogUpsertArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$TicketAnalysisLogPayload>
+        }
+        aggregate: {
+          args: Prisma.TicketAnalysisLogAggregateArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.AggregateTicketAnalysisLog>
+        }
+        groupBy: {
+          args: Prisma.TicketAnalysisLogGroupByArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.TicketAnalysisLogGroupByOutputType>[]
+        }
+        count: {
+          args: Prisma.TicketAnalysisLogCountArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.TicketAnalysisLogCountAggregateOutputType> | number
+        }
+      }
+    }
+    SafetyEventLog: {
+      payload: Prisma.$SafetyEventLogPayload<ExtArgs>
+      fields: Prisma.SafetyEventLogFieldRefs
+      operations: {
+        findUnique: {
+          args: Prisma.SafetyEventLogFindUniqueArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SafetyEventLogPayload> | null
+        }
+        findUniqueOrThrow: {
+          args: Prisma.SafetyEventLogFindUniqueOrThrowArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SafetyEventLogPayload>
+        }
+        findFirst: {
+          args: Prisma.SafetyEventLogFindFirstArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SafetyEventLogPayload> | null
+        }
+        findFirstOrThrow: {
+          args: Prisma.SafetyEventLogFindFirstOrThrowArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SafetyEventLogPayload>
+        }
+        findMany: {
+          args: Prisma.SafetyEventLogFindManyArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SafetyEventLogPayload>[]
+        }
+        create: {
+          args: Prisma.SafetyEventLogCreateArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SafetyEventLogPayload>
+        }
+        createMany: {
+          args: Prisma.SafetyEventLogCreateManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        createManyAndReturn: {
+          args: Prisma.SafetyEventLogCreateManyAndReturnArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SafetyEventLogPayload>[]
+        }
+        delete: {
+          args: Prisma.SafetyEventLogDeleteArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SafetyEventLogPayload>
+        }
+        update: {
+          args: Prisma.SafetyEventLogUpdateArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SafetyEventLogPayload>
+        }
+        deleteMany: {
+          args: Prisma.SafetyEventLogDeleteManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        updateMany: {
+          args: Prisma.SafetyEventLogUpdateManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        updateManyAndReturn: {
+          args: Prisma.SafetyEventLogUpdateManyAndReturnArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SafetyEventLogPayload>[]
+        }
+        upsert: {
+          args: Prisma.SafetyEventLogUpsertArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SafetyEventLogPayload>
+        }
+        aggregate: {
+          args: Prisma.SafetyEventLogAggregateArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.AggregateSafetyEventLog>
+        }
+        groupBy: {
+          args: Prisma.SafetyEventLogGroupByArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.SafetyEventLogGroupByOutputType>[]
+        }
+        count: {
+          args: Prisma.SafetyEventLogCountArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.SafetyEventLogCountAggregateOutputType> | number
+        }
+      }
+    }
   }
 } & {
   other: {
@@ -800,6 +950,38 @@ export const VerificationScalarFieldEnum = {
 export type VerificationScalarFieldEnum = (typeof VerificationScalarFieldEnum)[keyof typeof VerificationScalarFieldEnum]
 
 
+export const TicketAnalysisLogScalarFieldEnum = {
+  id: 'id',
+  ticketId: 'ticketId',
+  complaintPreview: 'complaintPreview',
+  language: 'language',
+  channel: 'channel',
+  userType: 'userType',
+  caseType: 'caseType',
+  evidenceVerdict: 'evidenceVerdict',
+  relevantTransactionId: 'relevantTransactionId',
+  severity: 'severity',
+  department: 'department',
+  humanReviewRequired: 'humanReviewRequired',
+  confidence: 'confidence',
+  reasonCodesJson: 'reasonCodesJson',
+  createdAt: 'createdAt'
+} as const
+
+export type TicketAnalysisLogScalarFieldEnum = (typeof TicketAnalysisLogScalarFieldEnum)[keyof typeof TicketAnalysisLogScalarFieldEnum]
+
+
+export const SafetyEventLogScalarFieldEnum = {
+  id: 'id',
+  ticketId: 'ticketId',
+  eventType: 'eventType',
+  detail: 'detail',
+  createdAt: 'createdAt'
+} as const
+
+export type SafetyEventLogScalarFieldEnum = (typeof SafetyEventLogScalarFieldEnum)[keyof typeof SafetyEventLogScalarFieldEnum]
+
+
 export const SortOrder = {
   asc: 'asc',
   desc: 'desc'
@@ -862,6 +1044,20 @@ export type DateTimeFieldRefInput<$PrismaModel> = FieldRefInputType<$PrismaModel
  * Reference to a field of type 'DateTime[]'
  */
 export type ListDateTimeFieldRefInput<$PrismaModel> = FieldRefInputType<$PrismaModel, 'DateTime[]'>
+    
+
+
+/**
+ * Reference to a field of type 'Float'
+ */
+export type FloatFieldRefInput<$PrismaModel> = FieldRefInputType<$PrismaModel, 'Float'>
+    
+
+
+/**
+ * Reference to a field of type 'Float[]'
+ */
+export type ListFloatFieldRefInput<$PrismaModel> = FieldRefInputType<$PrismaModel, 'Float[]'>
     
 
 
@@ -992,6 +1188,8 @@ export type GlobalOmitConfig = {
   session?: Prisma.SessionOmit
   account?: Prisma.AccountOmit
   verification?: Prisma.VerificationOmit
+  ticketAnalysisLog?: Prisma.TicketAnalysisLogOmit
+  safetyEventLog?: Prisma.SafetyEventLogOmit
 }
 
 /* Types for Logging */

@@ -11,3 +11,35 @@ generator client {
 datasource db {
   provider = "postgresql"
 }
+
+// ── QueueStorm Investigator — Optional Logging Models ────────────────────────
+
+model TicketAnalysisLog {
+  id                    String   @id @default(cuid())
+  ticketId              String
+  complaintPreview      String
+  language              String?
+  channel               String?
+  userType              String?
+  caseType              String
+  evidenceVerdict       String
+  relevantTransactionId String?
+  severity              String
+  department            String
+  humanReviewRequired   Boolean
+  confidence            Float?
+  reasonCodesJson       String?
+  createdAt             DateTime @default(now())
+
+  @@map("ticket_analysis_log")
+}
+
+model SafetyEventLog {
+  id        String   @id @default(cuid())
+  ticketId  String?
+  eventType String
+  detail    String
+  createdAt DateTime @default(now())
+
+  @@map("safety_event_log")
+}

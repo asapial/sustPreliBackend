@@ -11,7 +11,8 @@
     "migrate": "npx prisma migrate dev",
     "generate": "npx prisma generate",
     "postinstall": "prisma generate",
-    "build": "prisma generate && tsup src/server.ts --format esm --platform node --target node20 --outDir api --external pg-native"
+    "build": "prisma generate && tsup src/server.ts --format esm --platform node --target node20 --outDir dist --external pg-native",
+    "start": "node dist/server.js"
   },
   "keywords": [],
   "author": "",
@@ -38,7 +39,8 @@
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "http-status": "^2.1.0",
-    "jsonwebtoken": "^9.0.3"
+    "jsonwebtoken": "^9.0.3",
+    "zod": "^4.4.3"
   },
   "allowScripts": {
     "@prisma/engines@7.8.0": true,

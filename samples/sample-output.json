@@ -1,0 +1,14 @@
+{
+  "ticket_id": "TKT-001",
+  "relevant_transaction_id": "TXN-9101",
+  "evidence_verdict": "consistent",
+  "case_type": "wrong_transfer",
+  "severity": "high",
+  "department": "dispute_resolution",
+  "agent_summary": "Customer reports a wrong transfer issue related to transaction TXN-9101. Provided transaction evidence appears consistent, and the case is routed to dispute resolution.",
+  "recommended_next_action": "Verify the matched transfer details using approved internal checks and escalate to dispute resolution. Do not promise reversal before authorization.",
+  "customer_reply": "We have noted your concern about the transfer. Our support team will review the transaction details through official channels. Please do not share your PIN, OTP, password, or sensitive credentials with anyone.",
+  "human_review_required": true,
+  "confidence": 0.85,
+  "reason_codes": ["wrong_transfer", "transaction_match", "amount_match", "status_completed", "human_review_required", "high_value"]
+}

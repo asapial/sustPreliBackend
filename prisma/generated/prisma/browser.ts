@@ -37,3 +37,13 @@ export type Account = Prisma.AccountModel
  * 
  */
 export type Verification = Prisma.VerificationModel
+/**
+ * Model TicketAnalysisLog
+ * 
+ */
+export type TicketAnalysisLog = Prisma.TicketAnalysisLogModel
+/**
+ * Model SafetyEventLog
+ * 
+ */
+export type SafetyEventLog = Prisma.SafetyEventLogModel

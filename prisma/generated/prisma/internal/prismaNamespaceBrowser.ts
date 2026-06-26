@@ -54,7 +54,9 @@ export const ModelName = {
   User: 'User',
   Session: 'Session',
   Account: 'Account',
-  Verification: 'Verification'
+  Verification: 'Verification',
+  TicketAnalysisLog: 'TicketAnalysisLog',
+  SafetyEventLog: 'SafetyEventLog'
 } as const
 
 export type ModelName = (typeof ModelName)[keyof typeof ModelName]
@@ -129,6 +131,38 @@ export const VerificationScalarFieldEnum = {
 } as const
 
 export type VerificationScalarFieldEnum = (typeof VerificationScalarFieldEnum)[keyof typeof VerificationScalarFieldEnum]
+
+
+export const TicketAnalysisLogScalarFieldEnum = {
+  id: 'id',
+  ticketId: 'ticketId',
+  complaintPreview: 'complaintPreview',
+  language: 'language',
+  channel: 'channel',
+  userType: 'userType',
+  caseType: 'caseType',
+  evidenceVerdict: 'evidenceVerdict',
+  relevantTransactionId: 'relevantTransactionId',
+  severity: 'severity',
+  department: 'department',
+  humanReviewRequired: 'humanReviewRequired',
+  confidence: 'confidence',
+  reasonCodesJson: 'reasonCodesJson',
+  createdAt: 'createdAt'
+} as const
+
+export type TicketAnalysisLogScalarFieldEnum = (typeof TicketAnalysisLogScalarFieldEnum)[keyof typeof TicketAnalysisLogScalarFieldEnum]
+
+
+export const SafetyEventLogScalarFieldEnum = {
+  id: 'id',
+  ticketId: 'ticketId',
+  eventType: 'eventType',
+  detail: 'detail',
+  createdAt: 'createdAt'
+} as const
+
+export type SafetyEventLogScalarFieldEnum = (typeof SafetyEventLogScalarFieldEnum)[keyof typeof SafetyEventLogScalarFieldEnum]
 
 
 export const SortOrder = {
