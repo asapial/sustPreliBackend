@@ -1,392 +1,5 @@
-var __getOwnPropNames = Object.getOwnPropertyNames;
-var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
-  get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
-}) : x)(function(x) {
-  if (typeof require !== "undefined") return require.apply(this, arguments);
-  throw Error('Dynamic require of "' + x + '" is not supported');
-});
-var __commonJS = (cb, mod) => function __require2() {
-  return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
-};
-
-// node_modules/dotenv/lib/main.js
-var require_main = __commonJS({
-  "node_modules/dotenv/lib/main.js"(exports, module) {
-    "use strict";
-    var fs = __require("fs");
-    var path2 = __require("path");
-    var os = __require("os");
-    var crypto = __require("crypto");
-    var TIPS = [
-      "\u25C8 encrypted .env [www.dotenvx.com]",
-      "\u25C8 secrets for agents [www.dotenvx.com]",
-      "\u2301 auth for agents [www.vestauth.com]",
-      "\u2318 custom filepath { path: '/custom/path/.env' }",
-      "\u2318 enable debugging { debug: true }",
-      "\u2318 override existing { override: true }",
-      "\u2318 suppress logs { quiet: true }",
-      "\u2318 multiple files { path: ['.env.local', '.env'] }"
-    ];
-    function _getRandomTip() {
-      return TIPS[Math.floor(Math.random() * TIPS.length)];
-    }
-    function parseBoolean(value) {
-      if (typeof value === "string") {
-        return !["false", "0", "no", "off", ""].includes(value.toLowerCase());
-      }
-      return Boolean(value);
-    }
-    function supportsAnsi() {
-      return process.stdout.isTTY;
-    }
-    function dim(text) {
-      return supportsAnsi() ? `\x1B[2m${text}\x1B[0m` : text;
-    }
-    var LINE = /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/mg;
-    function parse(src) {
-      const obj = {};
-      let lines = src.toString();
-      lines = lines.replace(/\r\n?/mg, "\n");
-      let match;
-      while ((match = LINE.exec(lines)) != null) {
-        const key = match[1];
-        let value = match[2] || "";
-        value = value.trim();
-        const maybeQuote = value[0];
-        value = value.replace(/^(['"`])([\s\S]*)\1$/mg, "$2");
-        if (maybeQuote === '"') {
-          value = value.replace(/\\n/g, "\n");
-          value = value.replace(/\\r/g, "\r");
-        }
-        obj[key] = value;
-      }
-      return obj;
-    }
-    function _parseVault(options) {
-      options = options || {};
-      const vaultPath = _vaultPath(options);
-      options.path = vaultPath;
-      const result = DotenvModule.configDotenv(options);
-      if (!result.parsed) {
-        const err = new Error(`MISSING_DATA: Cannot parse ${vaultPath} for an unknown reason`);
-        err.code = "MISSING_DATA";
-        throw err;
-      }
-      const keys = _dotenvKey(options).split(",");
-      const length = keys.length;
-      let decrypted;
-      for (let i = 0; i < length; i++) {
-        try {
-          const key = keys[i].trim();
-          const attrs = _instructions(result, key);
-          decrypted = DotenvModule.decrypt(attrs.ciphertext, attrs.key);
-          break;
-        } catch (error) {
-          if (i + 1 >= length) {
-            throw error;
-          }
-        }
-      }
-      return DotenvModule.parse(decrypted);
-    }
-    function _warn(message) {
-      console.error(`\u26A0 ${message}`);
-    }
-    function _debug(message) {
-      console.log(`\u2506 ${message}`);
-    }
-    function _log(message) {
-      console.log(`\u25C7 ${message}`);
-    }
-    function _dotenvKey(options) {
-      if (options && options.DOTENV_KEY && options.DOTENV_KEY.length > 0) {
-        return options.DOTENV_KEY;
-      }
-      if (process.env.DOTENV_KEY && process.env.DOTENV_KEY.length > 0) {
-        return process.env.DOTENV_KEY;
-      }
-      return "";
-    }
-    function _instructions(result, dotenvKey) {
-      let uri;
-      try {
-        uri = new URL(dotenvKey);
-      } catch (error) {
-        if (error.code === "ERR_INVALID_URL") {
-          const err = new Error("INVALID_DOTENV_KEY: Wrong format. Must be in valid uri format like dotenv://:key_1234@dotenvx.com/vault/.env.vault?environment=development");
-          err.code = "INVALID_DOTENV_KEY";
-          throw err;
-        }
-        throw error;
-      }
-      const key = uri.password;
-      if (!key) {
-        const err = new Error("INVALID_DOTENV_KEY: Missing key part");
-        err.code = "INVALID_DOTENV_KEY";
-        throw err;
-      }
-      const environment = uri.searchParams.get("environment");
-      if (!environment) {
-        const err = new Error("INVALID_DOTENV_KEY: Missing environment part");
-        err.code = "INVALID_DOTENV_KEY";
-        throw err;
-      }
-      const environmentKey = `DOTENV_VAULT_${environment.toUpperCase()}`;
-      const ciphertext = result.parsed[environmentKey];
-      if (!ciphertext) {
-        const err = new Error(`NOT_FOUND_DOTENV_ENVIRONMENT: Cannot locate environment ${environmentKey} in your .env.vault file.`);
-        err.code = "NOT_FOUND_DOTENV_ENVIRONMENT";
-        throw err;
-      }
-      return { ciphertext, key };
-    }
-    function _vaultPath(options) {
-      let possibleVaultPath = null;
-      if (options && options.path && options.path.length > 0) {
-        if (Array.isArray(options.path)) {
-          for (const filepath of options.path) {
-            if (fs.existsSync(filepath)) {
-              possibleVaultPath = filepath.endsWith(".vault") ? filepath : `${filepath}.vault`;
-            }
-          }
-        } else {
-          possibleVaultPath = options.path.endsWith(".vault") ? options.path : `${options.path}.vault`;
-        }
-      } else {
-        possibleVaultPath = path2.resolve(process.cwd(), ".env.vault");
-      }
-      if (fs.existsSync(possibleVaultPath)) {
-        return possibleVaultPath;
-      }
-      return null;
-    }
-    function _resolveHome(envPath) {
-      return envPath[0] === "~" ? path2.join(os.homedir(), envPath.slice(1)) : envPath;
-    }
-    function _configVault(options) {
-      const debug = parseBoolean(process.env.DOTENV_CONFIG_DEBUG || options && options.debug);
-      const quiet = parseBoolean(process.env.DOTENV_CONFIG_QUIET || options && options.quiet);
-      if (debug || !quiet) {
-        _log("loading env from encrypted .env.vault");
-      }
-      const parsed = DotenvModule._parseVault(options);
-      let processEnv = process.env;
-      if (options && options.processEnv != null) {
-        processEnv = options.processEnv;
-      }
-      DotenvModule.populate(processEnv, parsed, options);
-      return { parsed };
-    }
-    function configDotenv(options) {
-      const dotenvPath = path2.resolve(process.cwd(), ".env");
-      let encoding = "utf8";
-      let processEnv = process.env;
-      if (options && options.processEnv != null) {
-        processEnv = options.processEnv;
-      }
-      let debug = parseBoolean(processEnv.DOTENV_CONFIG_DEBUG || options && options.debug);
-      let quiet = parseBoolean(processEnv.DOTENV_CONFIG_QUIET || options && options.quiet);
-      if (options && options.encoding) {
-        encoding = options.encoding;
-      } else {
-        if (debug) {
-          _debug("no encoding is specified (UTF-8 is used by default)");
-        }
-      }
-      let optionPaths = [dotenvPath];
-      if (options && options.path) {
-        if (!Array.isArray(options.path)) {
-          optionPaths = [_resolveHome(options.path)];
-        } else {
-          optionPaths = [];
-          for (const filepath of options.path) {
-            optionPaths.push(_resolveHome(filepath));
-          }
-        }
-      }
-      let lastError;
-      const parsedAll = {};
-      for (const path3 of optionPaths) {
-        try {
-          const parsed = DotenvModule.parse(fs.readFileSync(path3, { encoding }));
-          DotenvModule.populate(parsedAll, parsed, options);
-        } catch (e) {
-          if (debug) {
-            _debug(`failed to load ${path3} ${e.message}`);
-          }
-          lastError = e;
-        }
-      }
-      const populated = DotenvModule.populate(processEnv, parsedAll, options);
-      debug = parseBoolean(processEnv.DOTENV_CONFIG_DEBUG || debug);
-      quiet = parseBoolean(processEnv.DOTENV_CONFIG_QUIET || quiet);
-      if (debug || !quiet) {
-        const keysCount = Object.keys(populated).length;
-        const shortPaths = [];
-        for (const filePath of optionPaths) {
-          try {
-            const relative = path2.relative(process.cwd(), filePath);
-            shortPaths.push(relative);
-          } catch (e) {
-            if (debug) {
-              _debug(`failed to load ${filePath} ${e.message}`);
-            }
-            lastError = e;
-          }
-        }
-        _log(`injected env (${keysCount}) from ${shortPaths.join(",")} ${dim(`// tip: ${_getRandomTip()}`)}`);
-      }
-      if (lastError) {
-        return { parsed: parsedAll, error: lastError };
-      } else {
-        return { parsed: parsedAll };
-      }
-    }
-    function config2(options) {
-      if (_dotenvKey(options).length === 0) {
-        return DotenvModule.configDotenv(options);
-      }
-      const vaultPath = _vaultPath(options);
-      if (!vaultPath) {
-        _warn(`you set DOTENV_KEY but you are missing a .env.vault file at ${vaultPath}`);
-        return DotenvModule.configDotenv(options);
-      }
-      return DotenvModule._configVault(options);
-    }
-    function decrypt(encrypted, keyStr) {
-      const key = Buffer.from(keyStr.slice(-64), "hex");
-      let ciphertext = Buffer.from(encrypted, "base64");
-      const nonce = ciphertext.subarray(0, 12);
-      const authTag = ciphertext.subarray(-16);
-      ciphertext = ciphertext.subarray(12, -16);
-      try {
-        const aesgcm = crypto.createDecipheriv("aes-256-gcm", key, nonce);
-        aesgcm.setAuthTag(authTag);
-        return `${aesgcm.update(ciphertext)}${aesgcm.final()}`;
-      } catch (error) {
-        const isRange = error instanceof RangeError;
-        const invalidKeyLength = error.message === "Invalid key length";
-        const decryptionFailed = error.message === "Unsupported state or unable to authenticate data";
-        if (isRange || invalidKeyLength) {
-          const err = new Error("INVALID_DOTENV_KEY: It must be 64 characters long (or more)");
-          err.code = "INVALID_DOTENV_KEY";
-          throw err;
-        } else if (decryptionFailed) {
-          const err = new Error("DECRYPTION_FAILED: Please check your DOTENV_KEY");
-          err.code = "DECRYPTION_FAILED";
-          throw err;
-        } else {
-          throw error;
-        }
-      }
-    }
-    function populate(processEnv, parsed, options = {}) {
-      const debug = Boolean(options && options.debug);
-      const override = Boolean(options && options.override);
-      const populated = {};
-      if (typeof parsed !== "object") {
-        const err = new Error("OBJECT_REQUIRED: Please check the processEnv argument being passed to populate");
-        err.code = "OBJECT_REQUIRED";
-        throw err;
-      }
-      for (const key of Object.keys(parsed)) {
-        if (Object.prototype.hasOwnProperty.call(processEnv, key)) {
-          if (override === true) {
-            processEnv[key] = parsed[key];
-            populated[key] = parsed[key];
-          }
-          if (debug) {
-            if (override === true) {
-              _debug(`"${key}" is already defined and WAS overwritten`);
-            } else {
-              _debug(`"${key}" is already defined and was NOT overwritten`);
-            }
-          }
-        } else {
-          processEnv[key] = parsed[key];
-          populated[key] = parsed[key];
-        }
-      }
-      return populated;
-    }
-    var DotenvModule = {
-      configDotenv,
-      _configVault,
-      _parseVault,
-      config: config2,
-      decrypt,
-      parse,
-      populate
-    };
-    module.exports.configDotenv = DotenvModule.configDotenv;
-    module.exports._configVault = DotenvModule._configVault;
-    module.exports._parseVault = DotenvModule._parseVault;
-    module.exports.config = DotenvModule.config;
-    module.exports.decrypt = DotenvModule.decrypt;
-    module.exports.parse = DotenvModule.parse;
-    module.exports.populate = DotenvModule.populate;
-    module.exports = DotenvModule;
-  }
-});
-
-// node_modules/dotenv/lib/env-options.js
-var require_env_options = __commonJS({
-  "node_modules/dotenv/lib/env-options.js"(exports, module) {
-    "use strict";
-    var options = {};
-    if (process.env.DOTENV_CONFIG_ENCODING != null) {
-      options.encoding = process.env.DOTENV_CONFIG_ENCODING;
-    }
-    if (process.env.DOTENV_CONFIG_PATH != null) {
-      options.path = process.env.DOTENV_CONFIG_PATH;
-    }
-    if (process.env.DOTENV_CONFIG_QUIET != null) {
-      options.quiet = process.env.DOTENV_CONFIG_QUIET;
-    }
-    if (process.env.DOTENV_CONFIG_DEBUG != null) {
-      options.debug = process.env.DOTENV_CONFIG_DEBUG;
-    }
-    if (process.env.DOTENV_CONFIG_OVERRIDE != null) {
-      options.override = process.env.DOTENV_CONFIG_OVERRIDE;
-    }
-    if (process.env.DOTENV_CONFIG_DOTENV_KEY != null) {
-      options.DOTENV_KEY = process.env.DOTENV_CONFIG_DOTENV_KEY;
-    }
-    module.exports = options;
-  }
-});
-
-// node_modules/dotenv/lib/cli-options.js
-var require_cli_options = __commonJS({
-  "node_modules/dotenv/lib/cli-options.js"(exports, module) {
-    "use strict";
-    var re = /^dotenv_config_(encoding|path|quiet|debug|override|DOTENV_KEY)=(.+)$/;
-    module.exports = function optionMatcher(args) {
-      const options = args.reduce(function(acc, cur) {
-        const matches = cur.match(re);
-        if (matches) {
-          acc[matches[1]] = matches[2];
-        }
-        return acc;
-      }, {});
-      if (!("quiet" in options)) {
-        options.quiet = "true";
-      }
-      return options;
-    };
-  }
-});
-
-// node_modules/dotenv/config.js
-(function() {
-  require_main().config(
-    Object.assign(
-      {},
-      require_env_options(),
-      require_cli_options()(process.argv)
-    )
-  );
-})();
+// src/server.ts
+import "dotenv/config";
 
 // src/app.ts
 import express from "express";
@@ -399,6 +12,7 @@ import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
 
 // src/lib/prisma.ts
+import "dotenv/config";
 import { PrismaPg } from "@prisma/adapter-pg";
 
 // prisma/generated/prisma/client.ts
@@ -429,8 +43,8 @@ config.parameterizationSchema = {
   graph: "jQI0YAwEAAC-AQAgBQAAvwEAIG8AAL0BADBwAAAOABBxAAC9AQAwcgEAAAABdkAAqgEAIZEBQACqAQAhnwEBAKgBACGgAQEAAAABoQEgALMBACGiAQEAqQEAIQEAAAABACAMAwAAwgEAIG8AAMMBADBwAAADABBxAADDAQAwcgEAqAEAIXZAAKoBACGQAUAAqgEAIZEBQACqAQAhlAEBAKgBACGcAQEAqAEAIZ0BAQCpAQAhngEBAKkBACEDAwAAgQIAIJ0BAADEAQAgngEAAMQBACAMAwAAwgEAIG8AAMMBADBwAAADABBxAADDAQAwcgEAAAABdkAAqgEAIZABQACqAQAhkQFAAKoBACGUAQEAqAEAIZwBAQAAAAGdAQEAqQEAIZ4BAQCpAQAhAwAAAAMAIAEAAAQAMAIAAAUAIBEDAADCAQAgbwAAwAEAMHAAAAcAEHEAAMABADByAQCoAQAhdkAAqgEAIZEBQACqAQAhkgEBAKgBACGTAQEAqAEAIZQBAQCoAQAhlQEBAKkBACGWAQEAqQEAIZcBAQCpAQAhmAFAAMEBACGZAUAAwQEAIZoBAQCpAQAhmwEBAKkBACEIAwAAgQIAIJUBAADEAQAglgEAAMQBACCXAQAAxAEAIJgBAADEAQAgmQEAAMQBACCaAQAAxAEAIJsBAADEAQAgEQMAAMIBACBvAADAAQAwcAAABwAQcQAAwAEAMHIBAAAAAXZAAKoBACGRAUAAqgEAIZIBAQCoAQAhkwEBAKgBACGUAQEAqAEAIZUBAQCpAQAhlgEBAKkBACGXAQEAqQEAIZgBQADBAQAhmQFAAMEBACGaAQEAqQEAIZsBAQCpAQAhAwAAAAcAIAEAAAgAMAIAAAkAIAEAAAADACABAAAABwAgAQAAAAEAIAwEAAC-AQAgBQAAvwEAIG8AAL0BADBwAAAOABBxAAC9AQAwcgEAqAEAIXZAAKoBACGRAUAAqgEAIZ8BAQCoAQAhoAEBAKgBACGhASAAswEAIaIBAQCpAQAhAwQAAP8BACAFAACAAgAgogEAAMQBACADAAAADgAgAQAADwAwAgAAAQAgAwAAAA4AIAEAAA8AMAIAAAEAIAMAAAAOACABAAAPADACAAABACAJBAAA_QEAIAUAAP4BACByAQAAAAF2QAAAAAGRAUAAAAABnwEBAAAAAaABAQAAAAGhASAAAAABogEBAAAAAQEMAAATACAHcgEAAAABdkAAAAABkQFAAAAAAZ8BAQAAAAGgAQEAAAABoQEgAAAAAaIBAQAAAAEBDAAAFQAwAQwAABUAMAkEAADjAQAgBQAA5AEAIHIBAMgBACF2QADKAQAhkQFAAMoBACGfAQEAyAEAIaABAQDIAQAhoQEgANABACGiAQEAyQEAIQIAAAABACAMAAAYACAHcgEAyAEAIXZAAMoBACGRAUAAygEAIZ8BAQDIAQAhoAEBAMgBACGhASAA0AEAIaIBAQDJAQAhAgAAAA4AIAwAABoAIAIAAAAOACAMAAAaACADAAAAAQAgEwAAEwAgFAAAGAAgAQAAAAEAIAEAAAAOACAEBgAA4AEAIBkAAOIBACAaAADhAQAgogEAAMQBACAKbwAAvAEAMHAAACEAEHEAALwBADByAQCcAQAhdkAAngEAIZEBQACeAQAhnwEBAJwBACGgAQEAnAEAIaEBIACsAQAhogEBAJ0BACEDAAAADgAgAQAAIAAwGAAAIQAgAwAAAA4AIAEAAA8AMAIAAAEAIAEAAAAFACABAAAABQAgAwAAAAMAIAEAAAQAMAIAAAUAIAMAAAADACABAAAEADACAAAFACADAAAAAwAgAQAABAAwAgAABQAgCQMAAN8BACByAQAAAAF2QAAAAAGQAUAAAAABkQFAAAAAAZQBAQAAAAGcAQEAAAABnQEBAAAAAZ4BAQAAAAEBDAAAKQAgCHIBAAAAAXZAAAAAAZABQAAAAAGRAUAAAAABlAEBAAAAAZwBAQAAAAGdAQEAAAABngEBAAAAAQEMAAArADABDAAAKwAwCQMAAN4BACByAQDIAQAhdkAAygEAIZABQADKAQAhkQFAAMoBACGUAQEAyAEAIZwBAQDIAQAhnQEBAMkBACGeAQEAyQEAIQIAAAAFACAMAAAuACAIcgEAyAEAIXZAAMoBACGQAUAAygEAIZEBQADKAQAhlAEBAMgBACGcAQEAyAEAIZ0BAQDJAQAhngEBAMkBACECAAAAAwAgDAAAMAAgAgAAAAMAIAwAADAAIAMAAAAFACATAAApACAUAAAuACABAAAABQAgAQAAAAMAIAUGAADbAQAgGQAA3QEAIBoAANwBACCdAQAAxAEAIJ4BAADEAQAgC28AALsBADBwAAA3ABBxAAC7AQAwcgEAnAEAIXZAAJ4BACGQAUAAngEAIZEBQACeAQAhlAEBAJwBACGcAQEAnAEAIZ0BAQCdAQAhngEBAJ0BACEDAAAAAwAgAQAANgAwGAAANwAgAwAAAAMAIAEAAAQAMAIAAAUAIAEAAAAJACABAAAACQAgAwAAAAcAIAEAAAgAMAIAAAkAIAMAAAAHACABAAAIADACAAAJACADAAAABwAgAQAACAAwAgAACQAgDgMAANoBACByAQAAAAF2QAAAAAGRAUAAAAABkgEBAAAAAZMBAQAAAAGUAQEAAAABlQEBAAAAAZYBAQAAAAGXAQEAAAABmAFAAAAAAZkBQAAAAAGaAQEAAAABmwEBAAAAAQEMAAA_ACANcgEAAAABdkAAAAABkQFAAAAAAZIBAQAAAAGTAQEAAAABlAEBAAAAAZUBAQAAAAGWAQEAAAABlwEBAAAAAZgBQAAAAAGZAUAAAAABmgEBAAAAAZsBAQAAAAEBDAAAQQAwAQwAAEEAMA4DAADZAQAgcgEAyAEAIXZAAMoBACGRAUAAygEAIZIBAQDIAQAhkwEBAMgBACGUAQEAyAEAIZUBAQDJAQAhlgEBAMkBACGXAQEAyQEAIZgBQADYAQAhmQFAANgBACGaAQEAyQEAIZsBAQDJAQAhAgAAAAkAIAwAAEQAIA1yAQDIAQAhdkAAygEAIZEBQADKAQAhkgEBAMgBACGTAQEAyAEAIZQBAQDIAQAhlQEBAMkBACGWAQEAyQEAIZcBAQDJAQAhmAFAANgBACGZAUAA2AEAIZoBAQDJAQAhmwEBAMkBACECAAAABwAgDAAARgAgAgAAAAcAIAwAAEYAIAMAAAAJACATAAA_ACAUAABEACABAAAACQAgAQAAAAcAIAoGAADVAQAgGQAA1wEAIBoAANYBACCVAQAAxAEAIJYBAADEAQAglwEAAMQBACCYAQAAxAEAIJkBAADEAQAgmgEAAMQBACCbAQAAxAEAIBBvAAC3AQAwcAAATQAQcQAAtwEAMHIBAJwBACF2QACeAQAhkQFAAJ4BACGSAQEAnAEAIZMBAQCcAQAhlAEBAJwBACGVAQEAnQEAIZYBAQCdAQAhlwEBAJ0BACGYAUAAuAEAIZkBQAC4AQAhmgEBAJ0BACGbAQEAnQEAIQMAAAAHACABAABMADAYAABNACADAAAABwAgAQAACAAwAgAACQAgCW8AALYBADBwAABTABBxAAC2AQAwcgEAAAABdkAAqgEAIY4BAQCoAQAhjwEBAKgBACGQAUAAqgEAIZEBQACqAQAhAQAAAFAAIAEAAABQACAJbwAAtgEAMHAAAFMAEHEAALYBADByAQCoAQAhdkAAqgEAIY4BAQCoAQAhjwEBAKgBACGQAUAAqgEAIZEBQACqAQAhAAMAAABTACABAABUADACAABQACADAAAAUwAgAQAAVAAwAgAAUAAgAwAAAFMAIAEAAFQAMAIAAFAAIAZyAQAAAAF2QAAAAAGOAQEAAAABjwEBAAAAAZABQAAAAAGRAUAAAAABAQwAAFgAIAZyAQAAAAF2QAAAAAGOAQEAAAABjwEBAAAAAZABQAAAAAGRAUAAAAABAQwAAFoAMAEMAABaADAGcgEAyAEAIXZAAMoBACGOAQEAyAEAIY8BAQDIAQAhkAFAAMoBACGRAUAAygEAIQIAAABQACAMAABdACAGcgEAyAEAIXZAAMoBACGOAQEAyAEAIY8BAQDIAQAhkAFAAMoBACGRAUAAygEAIQIAAABTACAMAABfACACAAAAUwAgDAAAXwAgAwAAAFAAIBMAAFgAIBQAAF0AIAEAAABQACABAAAAUwAgAwYAANIBACAZAADUAQAgGgAA0wEAIAlvAAC1AQAwcAAAZgAQcQAAtQEAMHIBAJwBACF2QACeAQAhjgEBAJwBACGPAQEAnAEAIZABQACeAQAhkQFAAJ4BACEDAAAAUwAgAQAAZQAwGAAAZgAgAwAAAFMAIAEAAFQAMAIAAFAAIBJvAACyAQAwcAAAbAAQcQAAsgEAMHIBAAAAAXMBAKgBACF2QACqAQAhggEBAKgBACGDAQEAqQEAIYQBAQCpAQAhhQEBAKkBACGGAQEAqAEAIYcBAQCoAQAhiAEBAKkBACGJAQEAqAEAIYoBAQCoAQAhiwEgALMBACGMAQgAtAEAIY0BAQCpAQAhAQAAAGkAIAEAAABpACASbwAAsgEAMHAAAGwAEHEAALIBADByAQCoAQAhcwEAqAEAIXZAAKoBACGCAQEAqAEAIYMBAQCpAQAhhAEBAKkBACGFAQEAqQEAIYYBAQCoAQAhhwEBAKgBACGIAQEAqQEAIYkBAQCoAQAhigEBAKgBACGLASAAswEAIYwBCAC0AQAhjQEBAKkBACEGgwEAAMQBACCEAQAAxAEAIIUBAADEAQAgiAEAAMQBACCMAQAAxAEAII0BAADEAQAgAwAAAGwAIAEAAG0AMAIAAGkAIAMAAABsACABAABtADACAABpACADAAAAbAAgAQAAbQAwAgAAaQAgD3IBAAAAAXMBAAAAAXZAAAAAAYIBAQAAAAGDAQEAAAABhAEBAAAAAYUBAQAAAAGGAQEAAAABhwEBAAAAAYgBAQAAAAGJAQEAAAABigEBAAAAAYsBIAAAAAGMAQgAAAABjQEBAAAAAQEMAABxACAPcgEAAAABcwEAAAABdkAAAAABggEBAAAAAYMBAQAAAAGEAQEAAAABhQEBAAAAAYYBAQAAAAGHAQEAAAABiAEBAAAAAYkBAQAAAAGKAQEAAAABiwEgAAAAAYwBCAAAAAGNAQEAAAABAQwAAHMAMAEMAABzADAPcgEAyAEAIXMBAMgBACF2QADKAQAhggEBAMgBACGDAQEAyQEAIYQBAQDJAQAhhQEBAMkBACGGAQEAyAEAIYcBAQDIAQAhiAEBAMkBACGJAQEAyAEAIYoBAQDIAQAhiwEgANABACGMAQgA0QEAIY0BAQDJAQAhAgAAAGkAIAwAAHYAIA9yAQDIAQAhcwEAyAEAIXZAAMoBACGCAQEAyAEAIYMBAQDJAQAhhAEBAMkBACGFAQEAyQEAIYYBAQDIAQAhhwEBAMgBACGIAQEAyQEAIYkBAQDIAQAhigEBAMgBACGLASAA0AEAIYwBCADRAQAhjQEBAMkBACECAAAAbAAgDAAAeAAgAgAAAGwAIAwAAHgAIAMAAABpACATAABxACAUAAB2ACABAAAAaQAgAQAAAGwAIAsGAADLAQAgGQAAzgEAIBoAAM0BACBbAADMAQAgXAAAzwEAIIMBAADEAQAghAEAAMQBACCFAQAAxAEAIIgBAADEAQAgjAEAAMQBACCNAQAAxAEAIBJvAACrAQAwcAAAfwAQcQAAqwEAMHIBAJwBACFzAQCcAQAhdkAAngEAIYIBAQCcAQAhgwEBAJ0BACGEAQEAnQEAIYUBAQCdAQAhhgEBAJwBACGHAQEAnAEAIYgBAQCdAQAhiQEBAJwBACGKAQEAnAEAIYsBIACsAQAhjAEIAK0BACGNAQEAnQEAIQMAAABsACABAAB-ADAYAAB_ACADAAAAbAAgAQAAbQAwAgAAaQAgCG8AAKcBADBwAACFAQAQcQAApwEAMHIBAAAAAXMBAKkBACF0AQCoAQAhdQEAqAEAIXZAAKoBACEBAAAAggEAIAEAAACCAQAgCG8AAKcBADBwAACFAQAQcQAApwEAMHIBAKgBACFzAQCpAQAhdAEAqAEAIXUBAKgBACF2QACqAQAhAXMAAMQBACADAAAAhQEAIAEAAIYBADACAACCAQAgAwAAAIUBACABAACGAQAwAgAAggEAIAMAAACFAQAgAQAAhgEAMAIAAIIBACAFcgEAAAABcwEAAAABdAEAAAABdQEAAAABdkAAAAABAQwAAIoBACAFcgEAAAABcwEAAAABdAEAAAABdQEAAAABdkAAAAABAQwAAIwBADABDAAAjAEAMAVyAQDIAQAhcwEAyQEAIXQBAMgBACF1AQDIAQAhdkAAygEAIQIAAACCAQAgDAAAjwEAIAVyAQDIAQAhcwEAyQEAIXQBAMgBACF1AQDIAQAhdkAAygEAIQIAAACFAQAgDAAAkQEAIAIAAACFAQAgDAAAkQEAIAMAAACCAQAgEwAAigEAIBQAAI8BACABAAAAggEAIAEAAACFAQAgBAYAAMUBACAZAADHAQAgGgAAxgEAIHMAAMQBACAIbwAAmwEAMHAAAJgBABBxAACbAQAwcgEAnAEAIXMBAJ0BACF0AQCcAQAhdQEAnAEAIXZAAJ4BACEDAAAAhQEAIAEAAJcBADAYAACYAQAgAwAAAIUBACABAACGAQAwAgAAggEAIAhvAACbAQAwcAAAmAEAEHEAAJsBADByAQCcAQAhcwEAnQEAIXQBAJwBACF1AQCcAQAhdkAAngEAIQ4GAACgAQAgGQAApgEAIBoAAKYBACB3AQAAAAF4AQAAAAR5AQAAAAR6AQAAAAF7AQAAAAF8AQAAAAF9AQAAAAF-AQClAQAhfwEAAAABgAEBAAAAAYEBAQAAAAEOBgAAowEAIBkAAKQBACAaAACkAQAgdwEAAAABeAEAAAAFeQEAAAAFegEAAAABewEAAAABfAEAAAABfQEAAAABfgEAogEAIX8BAAAAAYABAQAAAAGBAQEAAAABCwYAAKABACAZAAChAQAgGgAAoQEAIHdAAAAAAXhAAAAABHlAAAAABHpAAAAAAXtAAAAAAXxAAAAAAX1AAAAAAX5AAJ8BACELBgAAoAEAIBkAAKEBACAaAAChAQAgd0AAAAABeEAAAAAEeUAAAAAEekAAAAABe0AAAAABfEAAAAABfUAAAAABfkAAnwEAIQh3AgAAAAF4AgAAAAR5AgAAAAR6AgAAAAF7AgAAAAF8AgAAAAF9AgAAAAF-AgCgAQAhCHdAAAAAAXhAAAAABHlAAAAABHpAAAAAAXtAAAAAAXxAAAAAAX1AAAAAAX5AAKEBACEOBgAAowEAIBkAAKQBACAaAACkAQAgdwEAAAABeAEAAAAFeQEAAAAFegEAAAABewEAAAABfAEAAAABfQEAAAABfgEAogEAIX8BAAAAAYABAQAAAAGBAQEAAAABCHcCAAAAAXgCAAAABXkCAAAABXoCAAAAAXsCAAAAAXwCAAAAAX0CAAAAAX4CAKMBACELdwEAAAABeAEAAAAFeQEAAAAFegEAAAABewEAAAABfAEAAAABfQEAAAABfgEApAEAIX8BAAAAAYABAQAAAAGBAQEAAAABDgYAAKABACAZAACmAQAgGgAApgEAIHcBAAAAAXgBAAAABHkBAAAABHoBAAAAAXsBAAAAAXwBAAAAAX0BAAAAAX4BAKUBACF_AQAAAAGAAQEAAAABgQEBAAAAAQt3AQAAAAF4AQAAAAR5AQAAAAR6AQAAAAF7AQAAAAF8AQAAAAF9AQAAAAF-AQCmAQAhfwEAAAABgAEBAAAAAYEBAQAAAAEIbwAApwEAMHAAAIUBABBxAACnAQAwcgEAqAEAIXMBAKkBACF0AQCoAQAhdQEAqAEAIXZAAKoBACELdwEAAAABeAEAAAAEeQEAAAAEegEAAAABewEAAAABfAEAAAABfQEAAAABfgEApgEAIX8BAAAAAYABAQAAAAGBAQEAAAABC3cBAAAAAXgBAAAABXkBAAAABXoBAAAAAXsBAAAAAXwBAAAAAX0BAAAAAX4BAKQBACF_AQAAAAGAAQEAAAABgQEBAAAAAQh3QAAAAAF4QAAAAAR5QAAAAAR6QAAAAAF7QAAAAAF8QAAAAAF9QAAAAAF-QAChAQAhEm8AAKsBADBwAAB_ABBxAACrAQAwcgEAnAEAIXMBAJwBACF2QACeAQAhggEBAJwBACGDAQEAnQEAIYQBAQCdAQAhhQEBAJ0BACGGAQEAnAEAIYcBAQCcAQAhiAEBAJ0BACGJAQEAnAEAIYoBAQCcAQAhiwEgAKwBACGMAQgArQEAIY0BAQCdAQAhBQYAAKABACAZAACxAQAgGgAAsQEAIHcgAAAAAX4gALABACENBgAAowEAIBkAAK8BACAaAACvAQAgWwAArwEAIFwAAK8BACB3CAAAAAF4CAAAAAV5CAAAAAV6CAAAAAF7CAAAAAF8CAAAAAF9CAAAAAF-CACuAQAhDQYAAKMBACAZAACvAQAgGgAArwEAIFsAAK8BACBcAACvAQAgdwgAAAABeAgAAAAFeQgAAAAFeggAAAABewgAAAABfAgAAAABfQgAAAABfggArgEAIQh3CAAAAAF4CAAAAAV5CAAAAAV6CAAAAAF7CAAAAAF8CAAAAAF9CAAAAAF-CACvAQAhBQYAAKABACAZAACxAQAgGgAAsQEAIHcgAAAAAX4gALABACECdyAAAAABfiAAsQEAIRJvAACyAQAwcAAAbAAQcQAAsgEAMHIBAKgBACFzAQCoAQAhdkAAqgEAIYIBAQCoAQAhgwEBAKkBACGEAQEAqQEAIYUBAQCpAQAhhgEBAKgBACGHAQEAqAEAIYgBAQCpAQAhiQEBAKgBACGKAQEAqAEAIYsBIACzAQAhjAEIALQBACGNAQEAqQEAIQJ3IAAAAAF-IACxAQAhCHcIAAAAAXgIAAAABXkIAAAABXoIAAAAAXsIAAAAAXwIAAAAAX0IAAAAAX4IAK8BACEJbwAAtQEAMHAAAGYAEHEAALUBADByAQCcAQAhdkAAngEAIY4BAQCcAQAhjwEBAJwBACGQAUAAngEAIZEBQACeAQAhCW8AALYBADBwAABTABBxAAC2AQAwcgEAqAEAIXZAAKoBACGOAQEAqAEAIY8BAQCoAQAhkAFAAKoBACGRAUAAqgEAIRBvAAC3AQAwcAAATQAQcQAAtwEAMHIBAJwBACF2QACeAQAhkQFAAJ4BACGSAQEAnAEAIZMBAQCcAQAhlAEBAJwBACGVAQEAnQEAIZYBAQCdAQAhlwEBAJ0BACGYAUAAuAEAIZkBQAC4AQAhmgEBAJ0BACGbAQEAnQEAIQsGAACjAQAgGQAAugEAIBoAALoBACB3QAAAAAF4QAAAAAV5QAAAAAV6QAAAAAF7QAAAAAF8QAAAAAF9QAAAAAF-QAC5AQAhCwYAAKMBACAZAAC6AQAgGgAAugEAIHdAAAAAAXhAAAAABXlAAAAABXpAAAAAAXtAAAAAAXxAAAAAAX1AAAAAAX5AALkBACEId0AAAAABeEAAAAAFeUAAAAAFekAAAAABe0AAAAABfEAAAAABfUAAAAABfkAAugEAIQtvAAC7AQAwcAAANwAQcQAAuwEAMHIBAJwBACF2QACeAQAhkAFAAJ4BACGRAUAAngEAIZQBAQCcAQAhnAEBAJwBACGdAQEAnQEAIZ4BAQCdAQAhCm8AALwBADBwAAAhABBxAAC8AQAwcgEAnAEAIXZAAJ4BACGRAUAAngEAIZ8BAQCcAQAhoAEBAJwBACGhASAArAEAIaIBAQCdAQAhDAQAAL4BACAFAAC_AQAgbwAAvQEAMHAAAA4AEHEAAL0BADByAQCoAQAhdkAAqgEAIZEBQACqAQAhnwEBAKgBACGgAQEAqAEAIaEBIACzAQAhogEBAKkBACEDowEAAAMAIKQBAAADACClAQAAAwAgA6MBAAAHACCkAQAABwAgpQEAAAcAIBEDAADCAQAgbwAAwAEAMHAAAAcAEHEAAMABADByAQCoAQAhdkAAqgEAIZEBQACqAQAhkgEBAKgBACGTAQEAqAEAIZQBAQCoAQAhlQEBAKkBACGWAQEAqQEAIZcBAQCpAQAhmAFAAMEBACGZAUAAwQEAIZoBAQCpAQAhmwEBAKkBACEId0AAAAABeEAAAAAFeUAAAAAFekAAAAABe0AAAAABfEAAAAABfUAAAAABfkAAugEAIQ4EAAC-AQAgBQAAvwEAIG8AAL0BADBwAAAOABBxAAC9AQAwcgEAqAEAIXZAAKoBACGRAUAAqgEAIZ8BAQCoAQAhoAEBAKgBACGhASAAswEAIaIBAQCpAQAhpgEAAA4AIKcBAAAOACAMAwAAwgEAIG8AAMMBADBwAAADABBxAADDAQAwcgEAqAEAIXZAAKoBACGQAUAAqgEAIZEBQACqAQAhlAEBAKgBACGcAQEAqAEAIZ0BAQCpAQAhngEBAKkBACEAAAAAAasBAQAAAAEBqwEBAAAAAQGrAUAAAAABAAAAAAABqwEgAAAAAQWrAQgAAAABsQEIAAAAAbIBCAAAAAGzAQgAAAABtAEIAAAAAQAAAAAAAAGrAUAAAAABBRMAAIkCACAUAACMAgAgqAEAAIoCACCpAQAAiwIAIK4BAAABACADEwAAiQIAIKgBAACKAgAgrgEAAAEAIAAAAAUTAACEAgAgFAAAhwIAIKgBAACFAgAgqQEAAIYCACCuAQAAAQAgAxMAAIQCACCoAQAAhQIAIK4BAAABACAAAAALEwAA8QEAMBQAAPYBADCoAQAA8gEAMKkBAADzAQAwqgEAAPQBACCrAQAA9QEAMKwBAAD1AQAwrQEAAPUBADCuAQAA9QEAMK8BAAD3AQAwsAEAAPgBADALEwAA5QEAMBQAAOoBADCoAQAA5gEAMKkBAADnAQAwqgEAAOgBACCrAQAA6QEAMKwBAADpAQAwrQEAAOkBADCuAQAA6QEAMK8BAADrAQAwsAEAAOwBADAMcgEAAAABdkAAAAABkQFAAAAAAZIBAQAAAAGTAQEAAAABlQEBAAAAAZYBAQAAAAGXAQEAAAABmAFAAAAAAZkBQAAAAAGaAQEAAAABmwEBAAAAAQIAAAAJACATAADwAQAgAwAAAAkAIBMAAPABACAUAADvAQAgAQwAAIMCADARAwAAwgEAIG8AAMABADBwAAAHABBxAADAAQAwcgEAAAABdkAAqgEAIZEBQACqAQAhkgEBAKgBACGTAQEAqAEAIZQBAQCoAQAhlQEBAKkBACGWAQEAqQEAIZcBAQCpAQAhmAFAAMEBACGZAUAAwQEAIZoBAQCpAQAhmwEBAKkBACECAAAACQAgDAAA7wEAIAIAAADtAQAgDAAA7gEAIBBvAADsAQAwcAAA7QEAEHEAAOwBADByAQCoAQAhdkAAqgEAIZEBQACqAQAhkgEBAKgBACGTAQEAqAEAIZQBAQCoAQAhlQEBAKkBACGWAQEAqQEAIZcBAQCpAQAhmAFAAMEBACGZAUAAwQEAIZoBAQCpAQAhmwEBAKkBACEQbwAA7AEAMHAAAO0BABBxAADsAQAwcgEAqAEAIXZAAKoBACGRAUAAqgEAIZIBAQCoAQAhkwEBAKgBACGUAQEAqAEAIZUBAQCpAQAhlgEBAKkBACGXAQEAqQEAIZgBQADBAQAhmQFAAMEBACGaAQEAqQEAIZsBAQCpAQAhDHIBAMgBACF2QADKAQAhkQFAAMoBACGSAQEAyAEAIZMBAQDIAQAhlQEBAMkBACGWAQEAyQEAIZcBAQDJAQAhmAFAANgBACGZAUAA2AEAIZoBAQDJAQAhmwEBAMkBACEMcgEAyAEAIXZAAMoBACGRAUAAygEAIZIBAQDIAQAhkwEBAMgBACGVAQEAyQEAIZYBAQDJAQAhlwEBAMkBACGYAUAA2AEAIZkBQADYAQAhmgEBAMkBACGbAQEAyQEAIQxyAQAAAAF2QAAAAAGRAUAAAAABkgEBAAAAAZMBAQAAAAGVAQEAAAABlgEBAAAAAZcBAQAAAAGYAUAAAAABmQFAAAAAAZoBAQAAAAGbAQEAAAABB3IBAAAAAXZAAAAAAZABQAAAAAGRAUAAAAABnAEBAAAAAZ0BAQAAAAGeAQEAAAABAgAAAAUAIBMAAPwBACADAAAABQAgEwAA_AEAIBQAAPsBACABDAAAggIAMAwDAADCAQAgbwAAwwEAMHAAAAMAEHEAAMMBADByAQAAAAF2QACqAQAhkAFAAKoBACGRAUAAqgEAIZQBAQCoAQAhnAEBAAAAAZ0BAQCpAQAhngEBAKkBACECAAAABQAgDAAA-wEAIAIAAAD5AQAgDAAA-gEAIAtvAAD4AQAwcAAA-QEAEHEAAPgBADByAQCoAQAhdkAAqgEAIZABQACqAQAhkQFAAKoBACGUAQEAqAEAIZwBAQCoAQAhnQEBAKkBACGeAQEAqQEAIQtvAAD4AQAwcAAA-QEAEHEAAPgBADByAQCoAQAhdkAAqgEAIZABQACqAQAhkQFAAKoBACGUAQEAqAEAIZwBAQCoAQAhnQEBAKkBACGeAQEAqQEAIQdyAQDIAQAhdkAAygEAIZABQADKAQAhkQFAAMoBACGcAQEAyAEAIZ0BAQDJAQAhngEBAMkBACEHcgEAyAEAIXZAAMoBACGQAUAAygEAIZEBQADKAQAhnAEBAMgBACGdAQEAyQEAIZ4BAQDJAQAhB3IBAAAAAXZAAAAAAZABQAAAAAGRAUAAAAABnAEBAAAAAZ0BAQAAAAGeAQEAAAABBBMAAPEBADCoAQAA8gEAMKoBAAD0AQAgrgEAAPUBADAEEwAA5QEAMKgBAADmAQAwqgEAAOgBACCuAQAA6QEAMAAAAwQAAP8BACAFAACAAgAgogEAAMQBACAHcgEAAAABdkAAAAABkAFAAAAAAZEBQAAAAAGcAQEAAAABnQEBAAAAAZ4BAQAAAAEMcgEAAAABdkAAAAABkQFAAAAAAZIBAQAAAAGTAQEAAAABlQEBAAAAAZYBAQAAAAGXAQEAAAABmAFAAAAAAZkBQAAAAAGaAQEAAAABmwEBAAAAAQgFAAD-AQAgcgEAAAABdkAAAAABkQFAAAAAAZ8BAQAAAAGgAQEAAAABoQEgAAAAAaIBAQAAAAECAAAAAQAgEwAAhAIAIAMAAAAOACATAACEAgAgFAAAiAIAIAoAAAAOACAFAADkAQAgDAAAiAIAIHIBAMgBACF2QADKAQAhkQFAAMoBACGfAQEAyAEAIaABAQDIAQAhoQEgANABACGiAQEAyQEAIQgFAADkAQAgcgEAyAEAIXZAAMoBACGRAUAAygEAIZ8BAQDIAQAhoAEBAMgBACGhASAA0AEAIaIBAQDJAQAhCAQAAP0BACByAQAAAAF2QAAAAAGRAUAAAAABnwEBAAAAAaABAQAAAAGhASAAAAABogEBAAAAAQIAAAABACATAACJAgAgAwAAAA4AIBMAAIkCACAUAACNAgAgCgAAAA4AIAQAAOMBACAMAACNAgAgcgEAyAEAIXZAAMoBACGRAUAAygEAIZ8BAQDIAQAhoAEBAMgBACGhASAA0AEAIaIBAQDJAQAhCAQAAOMBACByAQDIAQAhdkAAygEAIZEBQADKAQAhnwEBAMgBACGgAQEAyAEAIaEBIADQAQAhogEBAMkBACEDBAYCBQoDBgAEAQMAAQEDAAECBAsABQwAAAAAAwYACRkAChoACwAAAAMGAAkZAAoaAAsBAwABAQMAAQMGABAZABEaABIAAAADBgAQGQARGgASAQMAAQEDAAEDBgAXGQAYGgAZAAAAAwYAFxkAGBoAGQAAAAMGAB8ZACAaACEAAAADBgAfGQAgGgAhAAAABQYAJxkAKhoAK1sAKFwAKQAAAAAABQYAJxkAKhoAK1sAKFwAKQAAAAMGADEZADIaADMAAAADBgAxGQAyGgAzBwIBCA0BCRABChEBCxIBDRQBDhYFDxcGEBkBERsFEhwHFR0BFh4BFx8FGyIIHCMMHSQCHiUCHyYCICcCISgCIioCIywFJC0NJS8CJjEFJzIOKDMCKTQCKjUFKzgPLDkTLToDLjsDLzwDMD0DMT4DMkADM0IFNEMUNUUDNkcFN0gVOEkDOUoDOksFO04WPE8aPVEbPlIbP1UbQFYbQVcbQlkbQ1sFRFwcRV4bRmAFR2EdSGIbSWMbSmQFS2ceTGgiTWojTmsjT24jUG8jUXAjUnIjU3QFVHUkVXcjVnkFV3olWHsjWXwjWn0FXYABJl6BASxfgwEtYIQBLWGHAS1iiAEtY4kBLWSLAS1ljQEFZo4BLmeQAS1okgEFaZMBL2qUAS1rlQEtbJYBBW2ZATBumgE0"
 };
 async function decodeBase64AsWasm(wasmBase64) {
-  const { Buffer: Buffer2 } = await import("buffer");
-  const wasmArray = Buffer2.from(wasmBase64, "base64");
+  const { Buffer } = await import("buffer");
+  const wasmArray = Buffer.from(wasmBase64, "base64");
   return new WebAssembly.Module(wasmArray);
 }
 config.compilerWasm = {
@@ -567,11 +181,12 @@ function extractSignals(rawComplaint) {
   const scamKeywords = [
     "scam",
     "fraud",
-    "fake",
+    "fake call",
     "suspicious call",
     "phishing",
-    "link",
     "suspicious link",
+    "click this link",
+    "click the link",
     "account blocked",
     "\u09AA\u09C1\u09B0\u09B8\u09CD\u0995\u09BE\u09B0",
     "\u09AA\u09CD\u09B0\u09A4\u09BE\u09B0\u09A3\u09BE",
@@ -585,7 +200,8 @@ function extractSignals(rawComplaint) {
     "send otp",
     "give otp",
     "share pin",
-    "give pin"
+    "give pin",
+    "share otp"
   ];
   const hasScamSignal = scamKeywords.some((kw) => normalized.includes(kw));
   const refundKeywords = [
@@ -613,7 +229,8 @@ function extractSignals(rawComplaint) {
     "wrong transfer",
     "\u09AD\u09C1\u09B2 \u09AE\u09BE\u09A8\u09C1\u09B7",
     "\u0985\u09A8\u09CD\u09AF \u09A8\u09AE\u09CD\u09AC\u09B0\u09C7",
-    "different number"
+    "different number",
+    "\u09AD\u09C1\u09B2 \u09A8\u09AE\u09CD\u09AC\u09B0\u09C7"
   ];
   const hasWrongTransferSignal = wrongTransferKeywords.some((kw) => normalized.includes(kw));
   const failedPaymentKeywords = [
@@ -624,12 +241,17 @@ function extractSignals(rawComplaint) {
     "balance cut",
     "\u099F\u09BE\u0995\u09BE \u0995\u09C7\u099F\u09C7 \u0997\u09C7\u099B\u09C7",
     "\u09AA\u09C7\u09AE\u09C7\u09A8\u09CD\u099F \u09B9\u09AF\u09BC\u09A8\u09BF",
-    "did not receive",
-    "merchant did not receive",
     "payment not received",
     "not completed",
     "\u099F\u09BE\u0995\u09BE \u0997\u09C7\u099B\u09C7",
-    "money deducted"
+    "money deducted",
+    "balance deducted",
+    "amount deducted",
+    // Pending payments: customer explicitly says pending → treat as failed-payment workflow
+    "payment is pending",
+    "transaction is pending",
+    "still pending",
+    "shows pending"
   ];
   const hasFailedPaymentSignal = failedPaymentKeywords.some((kw) => normalized.includes(kw));
   const duplicateKeywords = [
@@ -640,19 +262,23 @@ function extractSignals(rawComplaint) {
     "twice deducted",
     "\u09A6\u09C1\u0987\u09AC\u09BE\u09B0",
     "\u09A6\u09C1\u09AC\u09BE\u09B0",
+    "duibar",
+    "dui bar",
     "double charged",
     "billed twice",
-    "multiple times"
+    "multiple times",
+    "two times",
+    "charged two",
+    "pay twice",
+    "paying twice"
   ];
   const hasDuplicateSignal = duplicateKeywords.some((kw) => normalized.includes(kw));
   const merchantKeywords = [
     "settlement",
     "merchant settlement",
-    "merchant payment",
     "merchant portal",
     "\u09A6\u09CB\u0995\u09BE\u09A8\u09C7\u09B0 \u099F\u09BE\u0995\u09BE",
     "\u09AE\u09BE\u09B0\u09CD\u099A\u09C7\u09A8\u09CD\u099F",
-    "merchant",
     "shop payment",
     "business payment",
     "settlement delayed",
@@ -663,7 +289,6 @@ function extractSignals(rawComplaint) {
     "cash in",
     "cash-in",
     "cashin",
-    "agent",
     "deposit",
     "balance not added",
     "\u0995\u09CD\u09AF\u09BE\u09B6 \u0987\u09A8",
@@ -675,6 +300,25 @@ function extractSignals(rawComplaint) {
     "add balance"
   ];
   const hasAgentCashInSignal = agentCashInKeywords.some((kw) => normalized.includes(kw));
+  const cashOutKeywords = [
+    "cash out",
+    "cash-out",
+    "cashout",
+    "\u0995\u09CD\u09AF\u09BE\u09B6 \u0986\u0989\u099F",
+    "cash withdrawal",
+    "withdraw"
+  ];
+  const hasCashOutSignal = cashOutKeywords.some((kw) => normalized.includes(kw));
+  const balanceIssueKeywords = [
+    "balance",
+    "\u09AC\u09CD\u09AF\u09BE\u09B2\u09C7\u09A8\u09CD\u09B8",
+    "\u099F\u09BE\u0995\u09BE \u09A6\u09C7\u0996\u09BE\u099A\u09CD\u099B\u09C7 \u09A8\u09BE",
+    "balance wrong",
+    "wrong balance",
+    "balance issue",
+    "balance problem"
+  ];
+  const hasBalanceIssueSignal = balanceIssueKeywords.some((kw) => normalized.includes(kw));
   const promptInjectionKeywords = [
     "ignore previous",
     "ignore rules",
@@ -709,89 +353,97 @@ function extractSignals(rawComplaint) {
     hasDuplicateSignal,
     hasMerchantSignal,
     hasAgentCashInSignal,
+    hasCashOutSignal,
+    hasBalanceIssueSignal,
     hasPromptInjectionSignal,
     normalizedText: normalized
   };
 }
 
 // src/modules/analyze-ticket/analyze-ticket.engine.ts
+function fmt(amount) {
+  if (amount === void 0) return "unknown amount";
+  return `${amount.toLocaleString()} BDT`;
+}
+function fmtType(type) {
+  return type ? type.replace(/_/g, " ") : "transaction";
+}
 function classifyCaseType(signals) {
-  if (signals.hasScamSignal || signals.hasPinOtpPasswordSignal) {
+  if (!signals.hasPromptInjectionSignal && (signals.hasScamSignal || signals.hasPinOtpPasswordSignal)) {
     return "phishing_or_social_engineering";
   }
-  if (signals.hasDuplicateSignal) {
-    return "duplicate_payment";
-  }
-  if (signals.hasMerchantSignal) {
-    return "merchant_settlement_delay";
-  }
-  if (signals.hasAgentCashInSignal) {
-    return "agent_cash_in_issue";
-  }
-  if (signals.hasWrongTransferSignal) {
-    return "wrong_transfer";
-  }
-  if (signals.hasFailedPaymentSignal) {
-    return "payment_failed";
-  }
-  if (signals.hasRefundSignal) {
-    return "refund_request";
-  }
+  if (signals.hasDuplicateSignal) return "duplicate_payment";
+  if (signals.hasMerchantSignal) return "merchant_settlement_delay";
+  if (signals.hasAgentCashInSignal) return "agent_cash_in_issue";
+  if (signals.hasWrongTransferSignal) return "wrong_transfer";
+  if (signals.hasRefundSignal) return "refund_request";
+  if (signals.hasFailedPaymentSignal) return "payment_failed";
   return "other";
 }
+var TYPE_ALIGNMENT = {
+  wrong_transfer: ["transfer"],
+  payment_failed: ["payment"],
+  duplicate_payment: ["payment"],
+  merchant_settlement_delay: ["settlement"],
+  agent_cash_in_issue: ["cash_in"],
+  refund_request: ["refund", "payment", "transfer"],
+  phishing_or_social_engineering: ["transfer", "payment", "cash_out"]
+};
+var STATUS_ALIGNMENT = {
+  wrong_transfer: ["completed", "pending"],
+  // money sent (wrong transfer) OR still in-flight
+  payment_failed: ["failed", "pending"],
+  duplicate_payment: ["completed", "pending"],
+  merchant_settlement_delay: ["pending", "failed"],
+  agent_cash_in_issue: ["pending", "failed"],
+  refund_request: ["completed", "failed", "pending"]
+};
 function scoreTransaction(txn, signals, caseType) {
   let score = 0;
-  const normalizedCounterparty = txn.counterparty?.toLowerCase() ?? "";
   const txnId = txn.transaction_id?.toUpperCase() ?? "";
   if (signals.mentionedTransactionIds.some((id) => id.toUpperCase() === txnId)) {
     score += 6;
   }
-  if (txn.amount !== void 0 && signals.mentionedAmounts.some((amt) => Math.abs(amt - txn.amount) < 1)) {
-    score += 3;
-  }
-  if (signals.mentionedCounterparties.some((cp) => {
-    const cleanCp = cp.replace(/\s/g, "");
-    const cleanTxnCp = normalizedCounterparty.replace(/\s/g, "");
-    return cleanCp === cleanTxnCp || cleanTxnCp.includes(cleanCp) || cleanCp.includes(cleanTxnCp);
-  })) {
-    score += 3;
-  }
-  const typeAlignment = {
-    wrong_transfer: ["transfer"],
-    payment_failed: ["payment"],
-    duplicate_payment: ["payment"],
-    merchant_settlement_delay: ["settlement"],
-    agent_cash_in_issue: ["cash_in"],
-    refund_request: ["refund", "payment", "transfer"]
-  };
-  if (txn.type && typeAlignment[caseType]?.includes(txn.type)) {
-    score += 2;
-  } else if (txn.type) {
-    const contradictions = {
-      wrong_transfer: ["cash_in", "settlement"],
-      agent_cash_in_issue: ["settlement", "payment"]
-    };
-    if (contradictions[caseType]?.includes(txn.type)) {
-      score -= 2;
-    }
-  }
-  if (caseType === "payment_failed" && (txn.status === "failed" || txn.status === "pending")) {
-    score += 2;
-  } else if (caseType === "wrong_transfer" && txn.status === "completed") {
-    score += 2;
-  } else if (caseType === "duplicate_payment" && (txn.status === "completed" || txn.status === "pending")) {
-    score += 2;
-  } else if (caseType === "agent_cash_in_issue" && (txn.status === "pending" || txn.status === "failed")) {
-    score += 2;
-  } else if (caseType === "merchant_settlement_delay" && (txn.status === "pending" || txn.status === "failed")) {
-    score += 2;
-  }
   if (txn.amount !== void 0 && signals.mentionedAmounts.length > 0) {
-    const minMentioned = Math.min(...signals.mentionedAmounts);
+    if (signals.mentionedAmounts.some((amt) => Math.abs(amt - txn.amount) < 1)) {
+      score += 3;
+    } else if (signals.mentionedAmounts.some((amt) => Math.abs(amt - txn.amount) / txn.amount < 0.1)) {
+      score += 1;
+    }
     const maxMentioned = Math.max(...signals.mentionedAmounts);
-    if (txn.amount < minMentioned * 0.1 || txn.amount > maxMentioned * 10) {
+    if (txn.amount > maxMentioned * 5 || txn.amount < maxMentioned * 0.1) {
       score -= 2;
     }
+  }
+  if (signals.mentionedCounterparties.length > 0 && txn.counterparty) {
+    const normTxnCp = txn.counterparty.replace(/\s/g, "").toLowerCase();
+    if (signals.mentionedCounterparties.some((cp) => {
+      const c = cp.replace(/\s/g, "").toLowerCase();
+      return c === normTxnCp || normTxnCp.includes(c) || c.includes(normTxnCp);
+    })) {
+      score += 3;
+    }
+  }
+  if (txn.type) {
+    if (TYPE_ALIGNMENT[caseType]?.includes(txn.type)) {
+      score += 2;
+      if (caseType === "refund_request" && txn.type === "refund") score += 1;
+    } else {
+      const contradictions = {
+        wrong_transfer: ["settlement", "refund"],
+        payment_failed: ["cash_in", "settlement", "refund"],
+        agent_cash_in_issue: ["settlement", "payment", "cash_out"],
+        merchant_settlement_delay: ["cash_in", "cash_out", "refund"]
+      };
+      if (contradictions[caseType]?.includes(txn.type)) score -= 2;
+    }
+    if (caseType === "other") {
+      if (signals.hasCashOutSignal && txn.type === "cash_out") score += 2;
+      if (signals.hasRefundSignal && txn.type === "refund") score += 2;
+    }
+  }
+  if (txn.status && STATUS_ALIGNMENT[caseType]?.includes(txn.status)) {
+    score += 2;
   }
   return score;
 }
@@ -799,7 +451,7 @@ function findRelevantTransaction(transactions, signals, caseType) {
   if (!transactions || transactions.length === 0) {
     return { txn: null, score: 0, isDuplicate: false };
   }
-  if (caseType === "duplicate_payment" && transactions.length >= 2) {
+  if (caseType === "duplicate_payment") {
     for (let i = 0; i < transactions.length; i++) {
       for (let j = i + 1; j < transactions.length; j++) {
         const a = transactions[i];
@@ -811,95 +463,98 @@ function findRelevantTransaction(transactions, signals, caseType) {
     }
   }
   let bestTxn = null;
-  let bestScore = 0;
+  let bestScore = -Infinity;
   for (const txn of transactions) {
-    const score = scoreTransaction(txn, signals, caseType);
-    if (score > bestScore) {
-      bestScore = score;
+    const s = scoreTransaction(txn, signals, caseType);
+    if (s > bestScore) {
+      bestScore = s;
       bestTxn = txn;
     }
   }
-  const MATCH_THRESHOLD = 3;
-  return { txn: bestScore >= MATCH_THRESHOLD ? bestTxn : null, score: bestScore, isDuplicate: false };
+  if (caseType === "phishing_or_social_engineering") {
+    return { txn: bestScore >= 6 ? bestTxn : null, score: Math.max(0, bestScore), isDuplicate: false };
+  }
+  const isVague = signals.mentionedAmounts.length === 0 && signals.mentionedTransactionIds.length === 0;
+  const THRESHOLD = isVague ? 1 : 2;
+  return {
+    txn: bestScore >= THRESHOLD ? bestTxn : null,
+    score: Math.max(0, bestScore),
+    isDuplicate: false
+  };
 }
-function determineEvidenceVerdict(txn, caseType, signals, transactions) {
-  if (!txn || transactions.length === 0) {
-    return "insufficient_data";
+function determineEvidenceVerdict(txn, caseType, signals, transactions, isDuplicate) {
+  if (transactions.length === 0 || !txn) return "insufficient_data";
+  if (caseType === "payment_failed" && txn.status === "completed") return "inconsistent";
+  if (caseType === "wrong_transfer" && (txn.status === "failed" || txn.status === "reversed")) return "inconsistent";
+  if (caseType === "agent_cash_in_issue" && txn.status === "completed") return "inconsistent";
+  if (caseType === "merchant_settlement_delay" && txn.status === "completed") return "inconsistent";
+  if (caseType === "duplicate_payment" && !isDuplicate) return "inconsistent";
+  if (caseType === "refund_request") {
+    if (txn.type === "refund" && txn.status === "completed") return "inconsistent";
+    if (txn.status === "reversed") return "inconsistent";
   }
-  if (caseType === "wrong_transfer" && txn.type === "transfer" && txn.status === "completed") {
-    return "consistent";
+  if (signals.mentionedAmounts.length > 0 && txn.amount !== void 0 && !signals.mentionedAmounts.some((a) => Math.abs(a - txn.amount) / Math.max(txn.amount, 1) < 0.15)) {
+    const maxMentioned = Math.max(...signals.mentionedAmounts);
+    if (Math.abs(maxMentioned - txn.amount) / Math.max(txn.amount, 1) > 0.5) return "inconsistent";
   }
-  if (caseType === "payment_failed" && txn.type === "payment" && (txn.status === "failed" || txn.status === "pending")) {
-    return "consistent";
+  if (caseType === "wrong_transfer") {
+    if (txn.status === "completed" || txn.status === "pending") return "consistent";
   }
-  if (caseType === "duplicate_payment") {
-    return "consistent";
+  if (caseType === "payment_failed") {
+    if (txn.status === "failed" || txn.status === "pending") return "consistent";
   }
-  if (caseType === "merchant_settlement_delay" && txn.type === "settlement" && (txn.status === "pending" || txn.status === "failed")) {
-    return "consistent";
+  if (caseType === "duplicate_payment" && isDuplicate) return "consistent";
+  if (caseType === "merchant_settlement_delay") {
+    if (txn.status === "pending" || txn.status === "failed") return "consistent";
+    if (txn.type === "settlement") return "consistent";
   }
-  if (caseType === "agent_cash_in_issue" && txn.type === "cash_in" && (txn.status === "pending" || txn.status === "failed")) {
-    return "consistent";
+  if (caseType === "agent_cash_in_issue") {
+    if (txn.status === "pending" || txn.status === "failed") return "consistent";
+    if (txn.type === "cash_in") return "consistent";
   }
-  if (caseType === "refund_request" && txn.status !== "reversed") {
+  if (caseType === "refund_request") {
     return "consistent";
   }
   if (caseType === "phishing_or_social_engineering") {
-    return "insufficient_data";
+    return txn.status === "completed" || txn.status === "pending" ? "consistent" : "insufficient_data";
   }
-  if (caseType === "payment_failed" && txn.status === "completed") {
-    return "inconsistent";
-  }
-  if (caseType === "wrong_transfer" && txn.status === "failed") {
-    return "inconsistent";
-  }
-  if (signals.mentionedAmounts.length > 0 && txn.amount !== void 0 && !signals.mentionedAmounts.some((amt) => Math.abs(amt - txn.amount) < txn.amount * 0.1)) {
-    return "inconsistent";
-  }
-  if (caseType === "refund_request" && txn.status === "reversed") {
-    return "inconsistent";
-  }
+  if (caseType === "other") return "consistent";
+  if (txn.type && TYPE_ALIGNMENT[caseType]?.includes(txn.type)) return "consistent";
   return "insufficient_data";
 }
 function determineSeverity(caseType, evidenceVerdict, signals, txn) {
-  if (caseType === "phishing_or_social_engineering") {
+  if (caseType === "phishing_or_social_engineering") return "critical";
+  if (signals.hasPromptInjectionSignal && (signals.hasPinOtpPasswordSignal || signals.hasScamSignal)) {
     return "critical";
   }
-  if (signals.hasPromptInjectionSignal) {
-    return "critical";
+  const mentionedMax = signals.mentionedAmounts.length > 0 ? Math.max(...signals.mentionedAmounts) : 0;
+  if (caseType === "wrong_transfer") {
+    return evidenceVerdict === "insufficient_data" ? "medium" : "high";
   }
-  const amount = txn?.amount ?? (signals.mentionedAmounts.length > 0 ? Math.max(...signals.mentionedAmounts) : 0);
-  if (caseType === "wrong_transfer" && evidenceVerdict === "consistent") {
-    return "high";
-  }
-  if (amount >= 1e4) {
-    return "high";
-  }
-  if (evidenceVerdict === "inconsistent") {
-    return "high";
-  }
-  if (signals.hasRefundSignal && amount >= 5e3) {
-    return "high";
-  }
+  if (mentionedMax >= 1e4) return "high";
   if (caseType === "payment_failed") {
-    return amount >= 5e3 ? "high" : "medium";
+    return mentionedMax >= 5e3 ? "high" : "medium";
   }
   if (caseType === "duplicate_payment") {
-    return "medium";
+    return mentionedMax >= 5e3 ? "high" : "medium";
   }
   if (caseType === "merchant_settlement_delay") {
+    if (txn?.status === "failed") return "high";
+    if (mentionedMax >= 1e4) return "high";
     return "medium";
   }
   if (caseType === "agent_cash_in_issue") {
+    if (mentionedMax >= 1e4) return "high";
     return "medium";
   }
   if (caseType === "refund_request") {
-    return "medium";
+    return mentionedMax >= 5e3 ? "high" : "medium";
   }
-  if (evidenceVerdict === "insufficient_data" && caseType !== "other") {
-    return "medium";
+  if (caseType === "other") {
+    if (signals.hasBalanceIssueSignal || signals.hasCashOutSignal) return "medium";
+    return "low";
   }
-  return "low";
+  return "medium";
 }
 function determineDepartment(caseType, severity, evidenceVerdict) {
   switch (caseType) {
@@ -916,10 +571,7 @@ function determineDepartment(caseType, severity, evidenceVerdict) {
     case "phishing_or_social_engineering":
       return "fraud_risk";
     case "refund_request":
-      if (severity === "high" || severity === "critical" || evidenceVerdict === "inconsistent") {
-        return "dispute_resolution";
-      }
-      return "customer_support";
+      return severity === "high" || severity === "critical" || evidenceVerdict === "inconsistent" ? "dispute_resolution" : "customer_support";
     default:
       return "customer_support";
   }
@@ -928,43 +580,59 @@ function determineHumanReview(caseType, severity, evidenceVerdict, txn, signals)
   if (caseType === "wrong_transfer") return true;
   if (caseType === "phishing_or_social_engineering") return true;
   if (caseType === "duplicate_payment") return true;
-  if (severity === "high" || severity === "critical") return true;
-  if (evidenceVerdict === "insufficient_data" && caseType !== "other") return true;
-  if (evidenceVerdict === "inconsistent") return true;
-  if (txn && txn.amount !== void 0 && txn.amount >= 5e3) return true;
-  if (signals.hasRefundSignal) return true;
   if (caseType === "merchant_settlement_delay") return true;
   if (caseType === "agent_cash_in_issue") return true;
+  if (severity === "high" || severity === "critical") return true;
+  if (evidenceVerdict === "inconsistent") return true;
+  if (evidenceVerdict === "insufficient_data" && caseType !== "other") return true;
+  if (txn?.amount !== void 0 && txn.amount >= 5e3) return true;
+  if (caseType === "payment_failed") return true;
+  if (caseType === "refund_request") return true;
+  if (caseType === "other" && (signals.hasBalanceIssueSignal || signals.hasCashOutSignal)) return true;
   return false;
 }
-function generateAgentSummary(caseType, evidenceVerdict, department, txn) {
+function generateAgentSummary(caseType, evidenceVerdict, department, txn, signals) {
   const caseLabel = caseType.replace(/_/g, " ");
+  const dept = department.replace(/_/g, " ");
   if (txn) {
-    return `Customer reports a ${caseLabel} issue related to transaction ${txn.transaction_id}. Provided transaction evidence appears ${evidenceVerdict}, and the case is routed to ${department.replace(/_/g, " ")}.`;
+    const txnAmount = fmt(txn.amount);
+    const txnType = fmtType(txn.type);
+    const txnStatus = txn.status ?? "unknown";
+    const txnCp = txn.counterparty ? ` to ${txn.counterparty}` : "";
+    const txnTs = txn.timestamp ? ` on ${new Date(txn.timestamp).toUTCString()}` : "";
+    let verdictNote;
+    if (evidenceVerdict === "consistent") {
+      verdictNote = "Transaction evidence is consistent with the complaint";
+    } else if (evidenceVerdict === "inconsistent") {
+      verdictNote = `Transaction evidence contradicts the complaint \u2014 ${txnType} of ${txnAmount} is marked ${txnStatus}, which conflicts with the reported issue`;
+    } else {
+      verdictNote = "Evidence is present but additional verification is needed";
+    }
+    return `Customer reports a ${caseLabel} issue. Matched transaction: ${txn.transaction_id} (${txnType}, ${txnAmount}${txnCp}, status: ${txnStatus}${txnTs}). ${verdictNote}. Case routed to ${dept}.`;
   }
-  return `Customer reports a ${caseLabel} issue, but no matching transaction was found in the provided history. Evidence is insufficient from the current data.`;
+  const amountHint = signals.mentionedAmounts.length > 0 ? ` involving approximately ${fmt(Math.max(...signals.mentionedAmounts))}` : "";
+  const cpHint = signals.mentionedCounterparties.length > 0 ? ` with counterparty ${signals.mentionedCounterparties[0]}` : "";
+  return `Customer reports a ${caseLabel} issue${amountHint}${cpHint}. No transaction in the provided history could be matched to this complaint. Manual investigation required \u2014 case routed to ${dept}.`;
 }
-function generateRecommendedNextAction(caseType, evidenceVerdict) {
-  if (evidenceVerdict === "insufficient_data" && caseType === "other") {
-    return "Request only non-sensitive clarifying details such as approximate time, amount, or transaction reference if available. Do not request PIN, OTP, password, or full card number.";
-  }
+function generateRecommendedNextAction(caseType, evidenceVerdict, txn) {
+  const txnRef = txn ? ` (reference: ${txn.transaction_id})` : "";
   switch (caseType) {
     case "wrong_transfer":
-      return "Verify the matched transfer details using approved internal checks and escalate to dispute resolution. Do not promise reversal before authorization.";
+      return `Verify the matched transfer${txnRef} using approved internal tools. Confirm the intended recipient vs actual counterparty${txn?.counterparty ? ` (${txn.counterparty})` : ""}. Do not promise reversal before authorization from dispute_resolution.`;
     case "payment_failed":
-      return "Check transaction status, ledger debit status, and merchant confirmation. If eligible, follow the official failed-payment workflow.";
+      return `Check the ledger status for transaction${txnRef}. Confirm debit vs credit posting. If balance was deducted but merchant did not receive, follow the official failed-payment recovery workflow.`;
     case "refund_request":
-      return "Review transaction eligibility and policy status before taking any refund-related action. Do not confirm refund before authorization.";
+      return `Review transaction${txnRef} eligibility against refund policy. Verify current status${txn ? ` (currently: ${txn.status})` : ""}. Do not confirm refund before supervisor authorization.`;
     case "duplicate_payment":
-      return "Compare repeated payment records for amount, counterparty, and timestamp. Escalate to payments operations for adjustment review if duplicate debit is confirmed.";
+      return `Pull full payment records${txnRef ? " around " + txnRef : ""} and compare amount, counterparty, and timestamp for duplicate entries. Escalate to payments_ops if confirmed double debit.`;
     case "merchant_settlement_delay":
-      return "Check settlement batch status, merchant ID, and expected settlement window. Escalate to merchant operations if delayed.";
+      return `Check settlement batch status${txnRef}. Verify merchant ID and expected settlement window. Current status${txn ? `: ${txn.status}` : " unknown"}. Escalate to merchant_operations if overdue.`;
     case "agent_cash_in_issue":
-      return "Verify cash-in transaction status, agent ID, and ledger posting. Escalate to agent operations if the deposit was not reflected.";
+      return `Verify cash-in transaction${txnRef} against ledger posting. Confirm agent ID and balance credit. Status${txn ? `: ${txn.status}` : " unknown"}. Escalate to agent_operations if credit not reflected.`;
     case "phishing_or_social_engineering":
-      return "Escalate to fraud risk, record reported suspicious contact details if available, and advise the customer only through official safety guidance.";
+      return `Escalate immediately to fraud_risk. Log any suspicious phone number, link, or account mentioned. Advise customer through official channels only \u2014 do not share internal data.`;
     default:
-      return "Request only non-sensitive clarifying details such as approximate time, amount, or transaction reference if available. Do not request PIN, OTP, password, or full card number.";
+      return evidenceVerdict === "insufficient_data" ? `Request non-sensitive clarifying details: approximate time, amount${txnRef ? "" : ", or transaction reference"}. Do not request PIN, OTP, password, or card details.` : `Review available information${txnRef} and follow standard support workflow. Escalate if issue persists.`;
   }
 }
 function generateCustomerReply(caseType) {
@@ -988,83 +656,54 @@ function generateCustomerReply(caseType) {
   }
 }
 function calculateConfidence(txn, txnScore, signals, evidenceVerdict, caseType) {
-  let confidence = 0.5;
+  let c = 0.5;
   if (txn) {
-    if (txnScore >= 6) confidence += 0.2;
-    else if (txnScore >= 3) confidence += 0.1;
-    if (signals.mentionedAmounts.some((amt) => txn.amount !== void 0 && Math.abs(amt - txn.amount) < 1)) {
-      confidence += 0.1;
-    }
-    if (signals.mentionedCounterparties.length > 0) {
-      confidence += 0.1;
-    }
+    if (txnScore >= 8) c += 0.3;
+    else if (txnScore >= 6) c += 0.2;
+    else if (txnScore >= 4) c += 0.15;
+    else if (txnScore >= 2) c += 0.05;
+    if (signals.mentionedAmounts.some((a) => txn.amount !== void 0 && Math.abs(a - txn.amount) < 1)) c += 0.1;
+    if (signals.mentionedCounterparties.length > 0 && txn.counterparty) c += 0.05;
   } else {
-    confidence -= 0.2;
+    c -= 0.15;
   }
-  if (caseType !== "other") {
-    confidence += 0.1;
-  } else {
-    confidence -= 0.1;
-  }
-  if (evidenceVerdict === "inconsistent") {
-    confidence -= 0.2;
-  } else if (evidenceVerdict === "insufficient_data") {
-    confidence -= 0.1;
-  }
-  if (signals.mentionedAmounts.length === 0 && signals.mentionedTransactionIds.length === 0) {
-    confidence -= 0.1;
-  }
-  return Math.min(0.95, Math.max(0.1, Math.round(confidence * 100) / 100));
+  if (caseType !== "other") c += 0.05;
+  else c -= 0.1;
+  if (evidenceVerdict === "consistent") c += 0.1;
+  else if (evidenceVerdict === "inconsistent") c -= 0.15;
+  else c -= 0.05;
+  if (signals.mentionedAmounts.length === 0 && signals.mentionedTransactionIds.length === 0) c -= 0.05;
+  return Math.min(0.95, Math.max(0.1, Math.round(c * 100) / 100));
 }
 function buildReasonCodes(caseType, txn, signals, evidenceVerdict, humanReview, isDuplicate, severity) {
-  const codes = [];
-  codes.push(caseType);
+  const codes = [caseType];
   if (txn) {
     codes.push("transaction_match");
-    if (signals.mentionedAmounts.some((amt) => txn.amount !== void 0 && Math.abs(amt - txn.amount) < 1)) {
-      codes.push("amount_match");
-    }
-    if (signals.mentionedCounterparties.length > 0) {
-      codes.push("counterparty_match");
-    }
-    if (txn.type) {
-      codes.push("type_match");
-    }
+    if (signals.mentionedAmounts.some((a) => txn.amount !== void 0 && Math.abs(a - txn.amount) < 1)) codes.push("amount_match");
+    if (signals.mentionedCounterparties.length > 0 && txn.counterparty) codes.push("counterparty_match");
+    if (txn.type && TYPE_ALIGNMENT[caseType]?.includes(txn.type)) codes.push("type_match");
     if (txn.status === "completed") codes.push("status_completed");
     if (txn.status === "failed") codes.push("status_failed");
     if (txn.status === "pending") codes.push("status_pending");
     if (txn.status === "reversed") codes.push("status_reversed");
   } else {
     codes.push("no_transaction_match");
+    codes.push("insufficient_history");
   }
-  if (evidenceVerdict === "insufficient_data") {
-    if (!txn) codes.push("insufficient_history");
-  }
-  if (signals.hasPromptInjectionSignal) {
-    codes.push("prompt_injection_detected");
-  }
-  if (signals.hasPinOtpPasswordSignal) {
-    codes.push("credential_request_detected");
-  }
-  if (signals.hasScamSignal) {
-    codes.push("phishing_signal");
-  }
+  if (evidenceVerdict === "inconsistent") codes.push("evidence_contradiction");
+  if (signals.hasPromptInjectionSignal) codes.push("prompt_injection_detected");
+  if (signals.hasPinOtpPasswordSignal) codes.push("credential_request_detected");
+  if (signals.hasScamSignal) codes.push("phishing_signal");
   if (isDuplicate) {
     codes.push("duplicate_payment_detected");
     codes.push("repeated_amount_counterparty");
   }
-  if (humanReview) {
-    codes.push("human_review_required");
-  }
-  if (severity === "high" || severity === "critical") {
-    codes.push("high_value");
-  }
-  if (signals.mentionedAmounts.length === 0 && signals.mentionedTransactionIds.length === 0) {
-    codes.push("ambiguous_complaint");
-  }
+  if (humanReview) codes.push("human_review_required");
+  if (severity === "high" || severity === "critical") codes.push("high_value");
+  if (signals.mentionedAmounts.length === 0 && signals.mentionedTransactionIds.length === 0) codes.push("ambiguous_complaint");
   return [...new Set(codes)];
 }
-var UNSAFE_REPLY_PATTERNS = [
+var UNSAFE_PATTERNS = [
   "share your pin",
   "send otp",
   "give password",
@@ -1073,61 +712,28 @@ var UNSAFE_REPLY_PATTERNS = [
   "refund confirmed",
   "reversal confirmed",
   "account recovery confirmed",
-  "contact this number",
-  "click this link",
-  "your refund has been",
-  "refund has been processed"
+  "your refund has been processed"
 ];
-function applySafetyGuardrails(response, caseType) {
-  let modified = false;
-  const replyLower = response.customer_reply.toLowerCase();
-  const actionLower = response.recommended_next_action.toLowerCase();
-  for (const pattern of UNSAFE_REPLY_PATTERNS) {
-    if (replyLower.includes(pattern) || actionLower.includes(pattern)) {
-      modified = true;
-      break;
-    }
-  }
-  if (modified) {
+function applySafetyGuardrails(response, caseType, evidenceVerdict, txn) {
+  const isUnsafe = UNSAFE_PATTERNS.some(
+    (p) => response.customer_reply.toLowerCase().includes(p) || response.recommended_next_action.toLowerCase().includes(p)
+  );
+  if (isUnsafe) {
     response.customer_reply = generateCustomerReply(caseType);
-    response.recommended_next_action = generateRecommendedNextAction(caseType, response.evidence_verdict);
+    response.recommended_next_action = generateRecommendedNextAction(caseType, evidenceVerdict, txn);
     response.human_review_required = true;
-    if (!response.reason_codes.includes("safety_guardrail_applied")) {
-      response.reason_codes.push("safety_guardrail_applied");
-    }
+    if (!response.reason_codes.includes("safety_guardrail_applied")) response.reason_codes.push("safety_guardrail_applied");
   }
-  const validEvidenceVerdicts = ["consistent", "inconsistent", "insufficient_data"];
-  if (!validEvidenceVerdicts.includes(response.evidence_verdict)) {
-    response.evidence_verdict = "insufficient_data";
-  }
-  const validCaseTypes = [
-    "wrong_transfer",
-    "payment_failed",
-    "refund_request",
-    "duplicate_payment",
-    "merchant_settlement_delay",
-    "agent_cash_in_issue",
-    "phishing_or_social_engineering",
-    "other"
-  ];
-  if (!validCaseTypes.includes(response.case_type)) {
-    response.case_type = "other";
-  }
-  const validSeverities = ["low", "medium", "high", "critical"];
-  if (!validSeverities.includes(response.severity)) {
-    response.severity = "medium";
-  }
-  const validDepartments = [
-    "customer_support",
-    "dispute_resolution",
-    "payments_ops",
-    "merchant_operations",
-    "agent_operations",
-    "fraud_risk"
-  ];
-  if (!validDepartments.includes(response.department)) {
-    response.department = "customer_support";
-  }
+  const V = {
+    evidence_verdict: ["consistent", "inconsistent", "insufficient_data"],
+    case_type: ["wrong_transfer", "payment_failed", "refund_request", "duplicate_payment", "merchant_settlement_delay", "agent_cash_in_issue", "phishing_or_social_engineering", "other"],
+    severity: ["low", "medium", "high", "critical"],
+    department: ["customer_support", "dispute_resolution", "payments_ops", "merchant_operations", "agent_operations", "fraud_risk"]
+  };
+  if (!V.evidence_verdict.includes(response.evidence_verdict)) response.evidence_verdict = "insufficient_data";
+  if (!V.case_type.includes(response.case_type)) response.case_type = "other";
+  if (!V.severity.includes(response.severity)) response.severity = "medium";
+  if (!V.department.includes(response.department)) response.department = "customer_support";
   response.confidence = Math.min(0.95, Math.max(0.1, response.confidence));
   return response;
 }
@@ -1136,23 +742,15 @@ function analyzeTicket(input) {
   const signals = extractSignals(input.complaint);
   const caseType = classifyCaseType(signals);
   const { txn, score: txnScore, isDuplicate } = findRelevantTransaction(transactions, signals, caseType);
-  const evidenceVerdict = determineEvidenceVerdict(txn, caseType, signals, transactions);
+  const evidenceVerdict = determineEvidenceVerdict(txn, caseType, signals, transactions, isDuplicate);
   const severity = determineSeverity(caseType, evidenceVerdict, signals, txn);
   const department = determineDepartment(caseType, severity, evidenceVerdict);
   const humanReviewRequired = determineHumanReview(caseType, severity, evidenceVerdict, txn, signals);
-  const agentSummary = generateAgentSummary(caseType, evidenceVerdict, department, txn);
-  const recommendedNextAction = generateRecommendedNextAction(caseType, evidenceVerdict);
+  const agentSummary = generateAgentSummary(caseType, evidenceVerdict, department, txn, signals);
+  const recommendedNextAction = generateRecommendedNextAction(caseType, evidenceVerdict, txn);
   const customerReply = generateCustomerReply(caseType);
   const confidence = calculateConfidence(txn, txnScore, signals, evidenceVerdict, caseType);
-  const reasonCodes = buildReasonCodes(
-    caseType,
-    txn,
-    signals,
-    evidenceVerdict,
-    humanReviewRequired,
-    isDuplicate,
-    severity
-  );
+  const reasonCodes = buildReasonCodes(caseType, txn, signals, evidenceVerdict, humanReviewRequired, isDuplicate, severity);
   let response = {
     ticket_id: input.ticket_id,
     relevant_transaction_id: txn?.transaction_id ?? null,
@@ -1167,8 +765,7 @@ function analyzeTicket(input) {
     confidence,
     reason_codes: reasonCodes
   };
-  response = applySafetyGuardrails(response, caseType);
-  return response;
+  return applySafetyGuardrails(response, caseType, evidenceVerdict, txn);
 }
 
 // src/modules/analyze-ticket/analyze-ticket.service.ts
