@@ -103,8 +103,8 @@ function detectMultiTransactionAnomalies(
             type: "multiple_same_amount_different_recipients",
             transactions: group,
             description:
-              `Found ${group.length} transfers of ${fmt(group[0]?.amount)} to ` + +
-              `${group.length} different recipients: ${counterparties.join(", ")}. ` +
+              `Found ${group.length} transfers of ${fmt(group[0]?.amount)} to ` +
+              `${counterparties.length} different recipients: ${counterparties.join(", ")}. ` +
               `This pattern suggests a possible wrong transfer or unintended duplicate.`,
           };
         }
